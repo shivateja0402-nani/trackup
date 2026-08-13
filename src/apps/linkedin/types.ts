@@ -27,6 +27,10 @@ export interface Lead {
   outreach?: OutreachFlow | null;
   sent_steps?: string[] | null;
   status: LeadStatus;
+  /** When they accepted the connection request. Anchors the sequence due dates. */
+  accepted_at?: string | null;
+  /** When they replied. Re-anchors the two reply-branch due dates. */
+  replied_at?: string | null;
   created_at: string;
   updated_at: string;
 }

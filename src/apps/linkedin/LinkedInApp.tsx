@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import {
   ArrowLeft, Linkedin, Plus, Sparkles, Copy, Check, Trash2, Loader2, ExternalLink, X,
-  ThumbsUp, ThumbsDown, Lightbulb,
+  ThumbsUp, ThumbsDown, Lightbulb, Clock, MessageSquare,
 } from 'lucide-react';
 import { useLeads } from './useLeads';
 import { Lead, LeadStatus, OutreachFlow } from './types';
@@ -14,13 +14,62 @@ const STATUS_LABELS: Record<LeadStatus, string> = {
 };
 const STATUS_ORDER: LeadStatus[] = ['new', 'requested', 'connected', 'replied', 'meeting'];
 
-const SEQUENCE: { key: keyof OutreachFlow; title: string }[] = [
-  { key: 'connection_note', title: '1 · Connection request' },
-  { key: 'opener', title: '2 · Opener (after they accept)' },
-  { key: 'value', title: '3 · Value' },
-  { key: 'cta', title: '4 · Call to action' },
-  { key: 'bump', title: '5 · Bump (no reply)' },
+// `dueAfterDays` counts from the day they accept (status → connected). The
+// connection request goes out before that, so it has no due date.
+const SEQUENCE: { key: keyof OutreachFlow; title: string; dueAfterDays: number | null }[] = [
+  { key: 'connection_note', title: '1 · Connection request', dueAfterDays: null },
+  { key: 'opener', title: '2 · Opener (after they accept)', dueAfterDays: 0 },
+  { key: 'value', title: '3 · Value', dueAfterDays: 2 },
+  { key: 'cta', title: '4 · Call to action', dueAfterDays: 4 },
+  { key: 'bump', title: '5 · Bump (no reply)', dueAfterDays: 7 },
 ];
+
+// The reply branches get due dates too. They anchor on `replied_at` once a reply
+// is logged — answer within a day — and fall back to the connection anchor before
+// that, so every step in the flow always carries a date.
+const REPLY_DUE_AFTER_DAYS = 1;
+
+// --- Due dates ---------------------------------------------------------------
+
+const DAY_MS = 86_400_000;
+const startOfDay = (d: Date) => new Date(d.getFullYear(), d.getMonth(), d.getDate());
+
+const dueDateFor = (acceptedAt: string, offsetDays: number): Date =>
+  new Date(new Date(acceptedAt).getTime() + offsetDays * DAY_MS);
+
+/** Whole calendar days from today until `date`. Negative means overdue. */
+const daysUntil = (date: Date): number =>
+  Math.round((startOfDay(date).getTime() - startOfDay(new Date()).getTime()) / DAY_MS);
+
+const shortDate = (d: Date) => d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+
+type DueTone = 'overdue' | 'today' | 'upcoming';
+
+const describeDue = (date: Date): { label: string; tone: DueTone } => {
+  const diff = daysUntil(date);
+  if (diff < 0) return { label: `Overdue ${-diff}d · ${shortDate(date)}`, tone: 'overdue' };
+  if (diff === 0) return { label: `Due today · ${shortDate(date)}`, tone: 'today' };
+  if (diff === 1) return { label: `Due tomorrow · ${shortDate(date)}`, tone: 'upcoming' };
+  return { label: `Due in ${diff}d · ${shortDate(date)}`, tone: 'upcoming' };
+};
+
+/** The earliest unsent step that has a due date, for the list summary. */
+const nextDueStep = (lead: Lead): { title: string; date: Date } | null => {
+  if (!lead.outreach || !lead.accepted_at) return null;
+  const sent = lead.sent_steps ?? [];
+  for (const step of SEQUENCE) {
+    if (step.dueAfterDays === null || sent.includes(step.key)) continue;
+    if (!lead.outreach[step.key]) continue;
+    return { title: step.title.replace(/^\d+ · /, ''), date: dueDateFor(lead.accepted_at, step.dueAfterDays) };
+  }
+  return null;
+};
+
+const DUE_BADGE_CLASS: Record<DueTone, string> = {
+  overdue: 'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-300',
+  today: 'bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-300',
+  upcoming: 'bg-gray-100 text-gray-600 dark:bg-gray-700/50 dark:text-gray-300',
+};
 
 export const LinkedInApp: React.FC<{ onExit: () => void }> = ({ onExit }) => {
   const { leads, loading, addLead, updateLead, deleteLead } = useLeads();
@@ -79,11 +128,26 @@ export const LinkedInApp: React.FC<{ onExit: () => void }> = ({ onExit }) => {
                   <p className="text-xs text-gray-500 dark:text-gray-400 truncate mt-0.5">
                     {[lead.job_title, lead.company_name].filter(Boolean).join(' · ') || lead.linkedin_url}
                   </p>
-                  {lead.outreach && (
-                    <p className="text-[11px] text-linkedin-600 dark:text-linkedin-400 mt-1 flex items-center">
-                      <Sparkles className="w-3 h-3 mr-1" /> Flow ready
-                    </p>
-                  )}
+                  {lead.outreach && (() => {
+                    const next = nextDueStep(lead);
+                    if (!next) {
+                      return (
+                        <p className="text-[11px] text-linkedin-600 dark:text-linkedin-400 mt-1 flex items-center">
+                          <Sparkles className="w-3 h-3 mr-1" /> Flow ready
+                        </p>
+                      );
+                    }
+                    const { label, tone } = describeDue(next.date);
+                    return (
+                      <p className="text-[11px] mt-1 flex items-center gap-1.5">
+                        <Clock className={`w-3 h-3 flex-shrink-0 ${tone === 'overdue' ? 'text-red-500' : tone === 'today' ? 'text-amber-500' : 'text-gray-400'}`} />
+                        <span className={`font-semibold ${tone === 'overdue' ? 'text-red-600 dark:text-red-400' : tone === 'today' ? 'text-amber-600 dark:text-amber-400' : 'text-gray-500 dark:text-gray-400'}`}>
+                          {next.title}
+                        </span>
+                        <span className="text-gray-400 dark:text-gray-500 truncate">{label}</span>
+                      </p>
+                    );
+                  })()}
                 </button>
               ))}
             </div>
@@ -136,6 +200,29 @@ const LeadDetail: React.FC<{
     onUpdate(lead.id, { sent_steps: next });
   };
 
+  // Moving to `connected` starts the clock. Moving back to new/requested means
+  // they hadn't actually accepted, so the anchor is cleared. `replied` and
+  // `meeting` keep it — they are further along, not backwards.
+  const handleStatusChange = (status: LeadStatus) => {
+    const now = new Date().toISOString();
+    const updates: Partial<Lead> = { status };
+
+    if (status === 'connected' && !lead.accepted_at) updates.accepted_at = now;
+    else if (status === 'new' || status === 'requested') updates.accepted_at = null;
+
+    // A reply implies they accepted, so backfill the connection anchor if the
+    // lead jumped straight to `replied` without passing through `connected`.
+    if ((status === 'replied' || status === 'meeting') && !lead.replied_at) updates.replied_at = now;
+    else if (status !== 'replied' && status !== 'meeting') updates.replied_at = null;
+    if (updates.replied_at && !lead.accepted_at) updates.accepted_at = now;
+
+    onUpdate(lead.id, updates);
+  };
+
+  // Reply branches count from the reply once there is one; before that they sit
+  // on the connection timeline so they still show a date.
+  const replyAnchor = lead.replied_at ?? lead.accepted_at;
+
   const handleGenerate = async () => {
     const cfg = loadAIConfig();
     if (!cfg) {
@@ -171,32 +258,67 @@ const LeadDetail: React.FC<{
     }
   };
 
-  const Step: React.FC<{ id: string; title: string; text: string; track?: boolean; tone?: 'positive' | 'objection' }> = ({ id, title, text, track = true, tone }) => (
-    <div className={`card-modern p-4 ${tone === 'positive' ? 'border-l-4 border-l-green-400' : tone === 'objection' ? 'border-l-4 border-l-amber-400' : ''}`}>
-      <div className="flex items-center justify-between mb-2">
-        <h4 className="font-semibold text-sm text-gray-900 dark:text-white flex items-center">
-          {tone === 'positive' && <ThumbsUp className="w-4 h-4 mr-1.5 text-green-500" />}
-          {tone === 'objection' && <ThumbsDown className="w-4 h-4 mr-1.5 text-amber-500" />}
-          {title}
-        </h4>
-        <div className="flex items-center gap-3">
-          {track && (
-            <label className="flex items-center text-xs text-gray-500 cursor-pointer select-none">
-              <input type="checkbox" className="mr-1.5 accent-linkedin-600" checked={sentSteps.includes(id)} onChange={() => toggleSent(id)} />
-              Sent
-            </label>
+  // `dueAfterDays` null = no schedule (only the connection request, which goes out
+  // before there is an anchor to count from). `anchorAt` lets the reply branches
+  // re-anchor on the reply date once one is logged.
+  const Step: React.FC<{
+    id: string; title: string; text: string;
+    track?: boolean; tone?: 'positive' | 'objection';
+    dueAfterDays?: number | null; anchorAt?: string | null; awaitingReply?: boolean;
+  }> = ({ id, title, text, track = true, tone, dueAfterDays = null, anchorAt, awaitingReply = false }) => {
+    const isSent = sentSteps.includes(id);
+    const anchor = anchorAt === undefined ? lead.accepted_at : anchorAt;
+    const due = dueAfterDays !== null && anchor ? dueDateFor(anchor, dueAfterDays) : null;
+
+    const schedule = (() => {
+      if (dueAfterDays === null) return null;
+      if (isSent) {
+        return <span className="text-[11px] font-semibold px-2 py-0.5 rounded-full bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-300">Sent</span>;
+      }
+      if (!due) {
+        return <span className="text-[11px] font-medium text-gray-400 dark:text-gray-500">Scheduled once they accept</span>;
+      }
+      const { label, tone: dueTone } = describeDue(due);
+      return (
+        <span className="inline-flex items-center gap-1.5">
+          {awaitingReply && (
+            <span className="text-[11px] font-medium text-gray-400 dark:text-gray-500 inline-flex items-center">
+              <MessageSquare className="w-3 h-3 mr-1" /> if they reply
+            </span>
           )}
-          {text && (
-            <button onClick={() => copy(text, id)} className="text-xs font-medium text-linkedin-600 hover:text-linkedin-700 inline-flex items-center">
-              {copied === id ? <Check className="w-3.5 h-3.5 mr-1" /> : <Copy className="w-3.5 h-3.5 mr-1" />}
-              {copied === id ? 'Copied' : 'Copy'}
-            </button>
-          )}
+          <span className={`text-[11px] font-semibold px-2 py-0.5 rounded-full ${DUE_BADGE_CLASS[dueTone]}`}>{label}</span>
+        </span>
+      );
+    })();
+
+    return (
+      <div className={`card-modern p-4 ${tone === 'positive' ? 'border-l-4 border-l-green-400' : tone === 'objection' ? 'border-l-4 border-l-amber-400' : ''}`}>
+        <div className="flex items-center justify-between mb-2 gap-3">
+          <h4 className="font-semibold text-sm text-gray-900 dark:text-white flex items-center min-w-0">
+            {tone === 'positive' && <ThumbsUp className="w-4 h-4 mr-1.5 flex-shrink-0 text-green-500" />}
+            {tone === 'objection' && <ThumbsDown className="w-4 h-4 mr-1.5 flex-shrink-0 text-amber-500" />}
+            <span className="truncate">{title}</span>
+          </h4>
+          <div className="flex items-center gap-3 flex-shrink-0">
+            {schedule}
+            {track && (
+              <label className="flex items-center text-xs text-gray-500 cursor-pointer select-none">
+                <input type="checkbox" className="mr-1.5 accent-linkedin-600" checked={isSent} onChange={() => toggleSent(id)} />
+                Sent
+              </label>
+            )}
+            {text && (
+              <button onClick={() => copy(text, id)} className="text-xs font-medium text-linkedin-600 hover:text-linkedin-700 inline-flex items-center">
+                {copied === id ? <Check className="w-3.5 h-3.5 mr-1" /> : <Copy className="w-3.5 h-3.5 mr-1" />}
+                {copied === id ? 'Copied' : 'Copy'}
+              </button>
+            )}
+          </div>
         </div>
+        <p className="text-sm text-gray-700 dark:text-gray-300 whitespace-pre-wrap leading-relaxed">{text}</p>
       </div>
-      <p className="text-sm text-gray-700 dark:text-gray-300 whitespace-pre-wrap leading-relaxed">{text}</p>
-    </div>
-  );
+    );
+  };
 
   return (
     <div className="space-y-4">
@@ -214,7 +336,7 @@ const LeadDetail: React.FC<{
           </button>
         </div>
         <div className="flex flex-wrap items-center gap-3 mt-4">
-          <select value={lead.status} onChange={(e) => onUpdate(lead.id, { status: e.target.value as LeadStatus })} className="input-modern !py-2 !w-auto text-sm">
+          <select value={lead.status} onChange={(e) => handleStatusChange(e.target.value as LeadStatus)} className="input-modern !py-2 !w-auto text-sm">
             {STATUS_ORDER.map((s) => <option key={s} value={s}>{STATUS_LABELS[s]}</option>)}
           </select>
           <button onClick={handleGenerate} disabled={generating} className="inline-flex items-center px-4 py-2 rounded-xl text-sm font-semibold text-white bg-gradient-to-r from-linkedin-500 to-linkedin-700 hover:from-linkedin-600 hover:to-linkedin-800 shadow-sm disabled:opacity-50">
@@ -222,6 +344,12 @@ const LeadDetail: React.FC<{
             {generating ? 'Generating…' : flow ? 'Regenerate flow' : 'Generate outreach flow'}
           </button>
         </div>
+        {lead.accepted_at && (
+          <p className="mt-3 text-xs text-gray-500 dark:text-gray-400 flex items-center">
+            <Clock className="w-3.5 h-3.5 mr-1.5 text-linkedin-500" />
+            Accepted {shortDate(new Date(lead.accepted_at))} — sequence dates count from here.
+          </p>
+        )}
         {error && <div className="mt-3 text-sm text-red-600 dark:text-red-400 bg-red-50 dark:bg-red-900/20 p-3 rounded-lg border border-red-200 dark:border-red-800">{error}</div>}
       </div>
 
@@ -234,10 +362,20 @@ const LeadDetail: React.FC<{
             </div>
           )}
           <h3 className="text-sm font-semibold text-gray-500 uppercase tracking-wide pt-1">Sequence</h3>
-          {SEQUENCE.map((s) => <Step key={s.key} id={s.key} title={s.title} text={flow[s.key]} />)}
+          {SEQUENCE.map((s) => (
+            <Step key={s.key} id={s.key} title={s.title} text={flow[s.key]} dueAfterDays={s.dueAfterDays} />
+          ))}
           <h3 className="text-sm font-semibold text-gray-500 uppercase tracking-wide pt-1">If they reply</h3>
-          <Step id="reply_positive" title="Positive / interested" text={flow.reply_positive} tone="positive" track={false} />
-          <Step id="reply_objection" title="Objection / not now" text={flow.reply_objection} tone="objection" track={false} />
+          <Step
+            id="reply_positive" title="Positive / interested" text={flow.reply_positive}
+            tone="positive" track={false}
+            dueAfterDays={REPLY_DUE_AFTER_DAYS} anchorAt={replyAnchor} awaitingReply={!lead.replied_at}
+          />
+          <Step
+            id="reply_objection" title="Objection / not now" text={flow.reply_objection}
+            tone="objection" track={false}
+            dueAfterDays={REPLY_DUE_AFTER_DAYS} anchorAt={replyAnchor} awaitingReply={!lead.replied_at}
+          />
         </>
       ) : (
         <div className="card-modern p-8 text-center text-gray-400">
