@@ -130,6 +130,10 @@ HARD RULES for every message above:
   transitions, and tidy moral-of-the-story endings. Slightly rough and specific
   beats smooth and generic.
 - Attach a number to any claim about a problem or a result. No vague benefits.
+- Write money as words: "9,240 dollars", "227K dollars" — never with a dollar
+  symbol. Gemini parses $...$ as LaTeX maths and silently swallows the digits,
+  so "$9,240" comes back as "240" or vanishes. The rule above asks for numbers,
+  which makes this failure likely without this guard.
 
 Be specific to THIS lead and sound like a real person typed it between meetings.`;
 
