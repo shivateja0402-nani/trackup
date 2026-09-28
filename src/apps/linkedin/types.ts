@@ -29,6 +29,22 @@ export const TERMINAL_STATUSES: ReadonlySet<LeadStatus> = new Set<LeadStatus>([
 export const isTerminal = (status: LeadStatus): boolean => TERMINAL_STATUSES.has(status);
 
 /**
+ * Scraped LinkedIn signals for a lead, written by the sourcing pipeline.
+ * Kept separate from `outreach` — that column is the generated copy, and a
+ * profile snapshot written there reads as an empty flow. Every field is
+ * optional because LinkedIn does not always expose them.
+ */
+export interface LeadProfile {
+  city_location?: string;
+  connections?: number;
+  followers?: number;
+  recently_active?: boolean;
+  is_decision_maker?: boolean;
+  qualification_passed?: boolean;
+  source?: string;
+}
+
+/**
  * A generated flow, keyed by method-pack step key.
  *
  * Deliberately open rather than a fixed interface: the pack owns the shape, and
@@ -120,6 +136,7 @@ export interface Lead {
   company_website?: string | null;
   potential_services?: string | null;
   outreach?: OutreachFlow | null;
+  profile?: LeadProfile | null;
   /**
    * Step key -> ISO8601 send time. Legacy rows hold a bare array of keys;
    * always read through `readSentSteps` rather than touching this directly.

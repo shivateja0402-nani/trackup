@@ -19,6 +19,7 @@ import { VerticalToggle } from '../../components/UI/VerticalToggle';
 import { useCaseStudies } from '../../lib/proof';
 import { QualifyPanel } from '../../components/Qualify/QualifyPanel';
 import { AppBar } from '../../components/Layout/AppBar';
+import { ProfileChips } from '../../components/UI/ProfileChips';
 import { ImportLeadsModal } from './ImportLeadsModal';
 import { StarterList } from '../../components/Setup/StarterList';
 import { ReplyLog } from '../../components/Activity/ReplyLog';
@@ -635,6 +636,7 @@ const LeadDetail: React.FC<{
             <a href={lead.linkedin_url} target="_blank" rel="noopener noreferrer" className="inline-flex items-center text-xs font-medium text-linkedin-600 hover:text-linkedin-700 mt-2">
               <ExternalLink className="w-3.5 h-3.5 mr-1" /> LinkedIn profile
             </a>
+            {lead.profile && <ProfileChips profile={lead.profile} />}
           </div>
           <button onClick={() => onDelete(lead.id)} className="p-2 text-gray-400 hover:text-red-500" aria-label="Delete lead">
             <Trash2 className="w-4 h-4" />
