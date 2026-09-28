@@ -11,13 +11,26 @@ export const useLeads = () => {
   const fetchLeads = useCallback(async () => {
     if (!user) return;
     setLoading(true);
-    const { data, error } = await supabase
-      .from('leads')
-      .select('*')
-      .eq('user_id', user.id)
-      .order('created_at', { ascending: false });
-    if (error) console.error('Error fetching leads:', error);
-    setLeads((data as Lead[]) ?? []);
+    // PostgREST caps a single response at its max_rows setting (1000 by
+    // default), so a lone select() silently truncates once leads pass that
+    // count. Page through with .range() until a page comes back short.
+    const PAGE_SIZE = 1000;
+    const all: Lead[] = [];
+    for (let from = 0; ; from += PAGE_SIZE) {
+      const { data, error } = await supabase
+        .from('leads')
+        .select('*')
+        .eq('user_id', user.id)
+        .order('created_at', { ascending: false })
+        .range(from, from + PAGE_SIZE - 1);
+      if (error) {
+        console.error('Error fetching leads:', error);
+        break;
+      }
+      all.push(...((data as Lead[]) ?? []));
+      if (!data || data.length < PAGE_SIZE) break;
+    }
+    setLeads(all);
     setLoading(false);
   }, [user]);
 
