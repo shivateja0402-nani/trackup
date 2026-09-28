@@ -64,6 +64,62 @@ const checkLength = (step: StructureStep, text: string): Violation[] => {
   ];
 };
 
+/**
+ * A number attached to a result, with nothing behind it.
+ *
+ * `checkAttribution` only catches a REAL figure — one that is actually in the
+ * evidence vault — appearing without its source. It has no way to catch a
+ * number that is not real at all, because there is nothing to compare it
+ * against. That gap shipped a fabricated "18 new patient bookings" and an
+ * invented "$500 to $1500 per month" past every existing check, on a lead
+ * whose case-study vault and evidence were both deliberately empty.
+ *
+ * So: when the caller confirms there is no real proof behind this generation
+ * (`hasProof: false`), any number shaped like a business result is a hard
+ * violation, full stop. `substantiateOrCut` already says this in the prompt —
+ * "if you cannot [substantiate], delete the claim" — but a prompt is a
+ * request, not a guarantee. This is the mechanical version of the same rule.
+ *
+ * Deliberately excludes bare durations ("15-minute call", "a 2pm slot") —
+ * those describe the ask, not a claimed outcome, and flagging them would
+ * bury the real violations under noise.
+ */
+const FIGURE_CLAIM = /\$\s?\d[\d,.]*\b|\b\d[\d,.]*\s?%|\b\d[\d,]*\+?\s+(?:\w+\s+){0,2}(?:patients?|bookings?|appointments?|clients?|customers?|leads?|calls?|reviews?|sign-?ups?|sales|deals?|meetings?|replies?|responses?|conversions?)\b/gi;
+
+const checkUnsubstantiatedFigures = (stepKey: string, text: string): Violation[] => {
+  const out: Violation[] = [];
+  const re = new RegExp(FIGURE_CLAIM.source, FIGURE_CLAIM.flags);
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(text)) !== null) {
+    out.push({
+      stepKey,
+      patternId: 'unsubstantiated-figure',
+      level: 'hard',
+      message:
+        `"${m[0]}" claims a specific result with nothing behind it — there is no case study or ` +
+        `industry evidence for this generation. Delete the number, or add real proof in Settings and regenerate.`,
+      excerpt: excerptAround(text, m.index, m[0].length),
+    });
+    if (m[0].length === 0) re.lastIndex++;
+  }
+  return out;
+};
+
+/**
+ * Pricing, in any form, mentioned in outreach.
+ *
+ * Not conditional on proof — the doctrine bans this outright ("Names and
+ * shapes only. Pricing does not belong in outreach"), whether or not the
+ * number behind it is real.
+ *
+ * Any dollar figure is banned outright rather than only ones next to "per
+ * month" — a live generation phrased its invented pricing as "500 to 1,500
+ * dollars monthly" with no `$` and no "per", which the first version of this
+ * pattern missed entirely. Caught retroactively; broadened so the next
+ * rephrasing doesn't get the same free pass.
+ */
+const PRICING_MENTION = /\$\s?\d[\d,.]*|\b\d[\d,.]*\s*(?:dollars?|usd)\b|\b(?:per|\/|a)\s*(?:month|year|mo|yr)\b|\bmonthly\b|\byearly\b|\bpricing\s+(?:ranges?|starts?|is)\b|\bstarting\s+at\s+\$/i;
+
 /** Extra material the output must be graded against, beyond the pack itself. */
 export interface ValidateOptions {
   /**
@@ -75,12 +131,19 @@ export interface ValidateOptions {
    * deleted.
    */
   evidence?: IndustryEvidence[];
+  /**
+   * Whether this generation had a real case study, industry evidence, or
+   * legacy wins/testimonials text behind it — i.e. `!proofEmpty` from
+   * `buildChannelPrompt`. Required, not defaulted true, because the safe
+   * assumption when a caller does not say is that nothing backs this copy.
+   */
+  hasProof: boolean;
 }
 
 export const validateOutput = (
   pack: MethodPack,
   output: GeneratedOutput,
-  options: ValidateOptions = {},
+  options: ValidateOptions = { hasProof: true },
 ): ValidationResult => {
   const violations: Violation[] = [];
 
@@ -98,6 +161,7 @@ export const validateOutput = (
     violations.push(...checkBanned(pack, step.key, text));
     violations.push(...checkLength(step, text));
     violations.push(...checkAttribution(step.key, text, options.evidence ?? []));
+    if (!options.hasProof) violations.push(...checkUnsubstantiatedFigures(step.key, text));
 
     // Subjects are graded too, and against the same banned patterns.
     //
@@ -119,6 +183,7 @@ export const validateOutput = (
     }
     violations.push(...checkBanned(pack, sKey, subject));
     violations.push(...checkAttribution(sKey, subject, options.evidence ?? []));
+    if (!options.hasProof) violations.push(...checkUnsubstantiatedFigures(sKey, subject));
     violations.push(
       ...checkLength(
         { ...step, key: sKey, label: `${step.label} subject`, maxChars: step.subject.maxChars },
@@ -171,5 +236,12 @@ export const UNIVERSAL_BANNED = [
     pattern: /[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}]/u,
     because: 'Wrong register for a senior B2B buyer, and a spam signal in cold email.',
     level: 'soft' as const,
+  },
+  {
+    id: 'pricing-mention',
+    label: 'Pricing mentioned',
+    pattern: PRICING_MENTION,
+    because: 'Names and shapes only — pricing does not belong in outreach, whether or not the figure is real.',
+    level: 'hard' as const,
   },
 ];

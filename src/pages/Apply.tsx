@@ -64,6 +64,17 @@ export const Apply: React.FC = () => {
     for the one rule whose whole job is catching an uncited borrowed number.
     Falling back to the current evidence re-grades stored copy.
   */
+  /*
+    Two different things, and they used to be one.
+
+    `noProof` means there was nothing at all to write from. `industryOnly`
+    means there is no client result but there IS a sourced industry figure,
+    which is a legitimate starting state and not a gap — the attribution law
+    forces the source into the same message. Showing "you have no case
+    studies" to that member is both wrong and the nag we decided against.
+  */
+  const [noProof, setNoProof] = useState(false);
+  const [industryOnly, setIndustryOnly] = useState(false);
   // Memoised: a fresh array literal on every render would change the
   // dependency of the check below every time, so the memo would recompute
   // the whole validation pass on each keystroke.
@@ -72,8 +83,9 @@ export const Apply: React.FC = () => {
     [sentEvidence, brief],
   );
   const check = useMemo(
-    () => (generatedData?.steps ? checkAgainstMethod('upwork', generatedData.steps, evidenceToGrade) : null),
-    [generatedData, evidenceToGrade],
+    () =>
+      generatedData?.steps ? checkAgainstMethod('upwork', generatedData.steps, evidenceToGrade, !noProof) : null,
+    [generatedData, evidenceToGrade, noProof],
   );
   const describeViolation = (v: NonNullable<typeof check>['violations'][number]) =>
     `${v.message}${v.excerpt ? `, "${v.excerpt}"` : ''}`;
@@ -90,17 +102,6 @@ export const Apply: React.FC = () => {
   */
   const [meta, setMeta] = useState<GenerationMeta | null>(null);
   const [proofUsed, setProofUsed] = useState<string | null>(null);
-  /*
-    Two different things, and they used to be one.
-
-    `noProof` means there was nothing at all to write from. `industryOnly`
-    means there is no client result but there IS a sourced industry figure,
-    which is a legitimate starting state and not a gap — the attribution law
-    forces the source into the same message. Showing "you have no case
-    studies" to that member is both wrong and the nag we decided against.
-  */
-  const [noProof, setNoProof] = useState(false);
-  const [industryOnly, setIndustryOnly] = useState(false);
 
   const handleGenerate = async () => {
     if (!jobTitle.trim() || !jobSummary.trim()) {
@@ -211,9 +212,12 @@ export const Apply: React.FC = () => {
         rung: verdict.rung,
         verdict: verdict.verdict,
         violation_ids: data.steps
-          ? checkAgainstMethod('upwork', data.steps, method.evidence).violations.map(
-              (v) => v.patternId ?? v.lawId ?? 'empty-step',
-            )
+          ? checkAgainstMethod(
+              'upwork',
+              data.steps,
+              method.evidence,
+              !method.nothingToWriteFrom,
+            ).violations.map((v) => v.patternId ?? v.lawId ?? 'empty-step')
           : [],
       });
 

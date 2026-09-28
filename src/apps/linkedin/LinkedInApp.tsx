@@ -354,8 +354,8 @@ const LeadDetail: React.FC<{
     [sentEvidence, brief],
   );
   const check = useMemo(
-    () => (flow && !flowIsEmpty ? checkAgainstMethod('linkedin', flow, evidenceToGrade) : null),
-    [flow, flowIsEmpty, evidenceToGrade],
+    () => (flow && !flowIsEmpty ? checkAgainstMethod('linkedin', flow, evidenceToGrade, !noProof) : null),
+    [flow, flowIsEmpty, evidenceToGrade, noProof],
   );
   const describeViolation = (v: ValidationResult['violations'][number]) =>
     `${v.message}${v.excerpt ? `, "${v.excerpt}"` : ''}`;
@@ -539,8 +539,12 @@ const LeadDetail: React.FC<{
         verdict: verdict.verdict,
         // Ids only. The excerpts are the user's own copy and have no business
         // being duplicated into a log.
-        violation_ids: checkAgainstMethod('linkedin', flowData as Record<string, string>, method.evidence)
-          .violations.map((v) => v.patternId ?? v.lawId ?? 'empty-step'),
+        violation_ids: checkAgainstMethod(
+          'linkedin',
+          flowData as Record<string, string>,
+          method.evidence,
+          !method.nothingToWriteFrom,
+        ).violations.map((v) => v.patternId ?? v.lawId ?? 'empty-step'),
       };
 
       // The generation is already paid for. If the save fails, say so and keep

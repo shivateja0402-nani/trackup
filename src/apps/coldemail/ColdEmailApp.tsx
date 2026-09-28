@@ -298,8 +298,8 @@ const ProspectDetail: React.FC<{
     [sentEvidence, brief],
   );
   const check = useMemo(
-    () => (sequence ? checkAgainstMethod('coldEmail', sequence, evidenceToGrade) : null),
-    [sequence, evidenceToGrade],
+    () => (sequence ? checkAgainstMethod('coldEmail', sequence, evidenceToGrade, !noProof) : null),
+    [sequence, evidenceToGrade, noProof],
   );
   const describe = (v: ValidationResult['violations'][number]) =>
     `${v.message}${v.excerpt ? `, "${v.excerpt}"` : ''}`;
@@ -413,8 +413,12 @@ const ProspectDetail: React.FC<{
         tier: verdict.tier,
         rung: verdict.rung,
         verdict: verdict.verdict,
-        violation_ids: checkAgainstMethod('coldEmail', seqData as Record<string, string>, method.evidence)
-          .violations.map((v) => v.patternId ?? v.lawId ?? 'empty-step'),
+        violation_ids: checkAgainstMethod(
+          'coldEmail',
+          seqData as Record<string, string>,
+          method.evidence,
+          !method.nothingToWriteFrom,
+        ).violations.map((v) => v.patternId ?? v.lawId ?? 'empty-step'),
       };
 
       const saved = await onUpdate(prospect.id, {

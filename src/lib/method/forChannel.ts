@@ -224,6 +224,15 @@ export const checkAgainstMethod = (
   channel: ChannelId,
   output: GeneratedOutput,
   evidence: IndustryEvidence[] = [],
-): ValidationResult => validateOutput(getPack(channel), output, { evidence });
+  /**
+   * Whether this output has real proof behind it — a case study, industry
+   * evidence, or legacy wins/testimonials text. Defaults to `true` so a
+   * caller re-grading an already-saved flow (which has no way to know what
+   * backed the original generation) does not retroactively flag numbers that
+   * were legitimate when written. The generation-time caller, which DOES
+   * know, passes the real value.
+   */
+  hasProof = true,
+): ValidationResult => validateOutput(getPack(channel), output, { evidence, hasProof });
 
 export type { ValidationResult };
