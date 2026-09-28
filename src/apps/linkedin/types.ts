@@ -95,12 +95,38 @@ export interface GenerationMeta {
   violation_ids: string[];
 }
 
+/**
+ * Same problem as `migrateFlow`, one column over.
+ *
+ * A migrated row's `sent_steps` was written under the OLD flow keys
+ * (`connection_note`, `opener`, ...), because that is what the app that wrote
+ * it called them. `cadenceFor` reads every step by the CURRENT pack key
+ * (`connectionNote`, `openerDm`, ...), so an unmapped legacy entry is invisible
+ * to it — not "sent, time unknown" but "never sent at all". On a lead whose
+ * connection request went out months ago, that reads as due today, and a
+ * thousand of them reading as due at once is how an operator re-sends a
+ * connection request to everyone who already has one pending.
+ *
+ * Legacy entries are applied first and modern ones after, so a real modern-key
+ * entry (the checkbox ticked in this app) always wins over a remapped guess.
+ */
+const remapLegacySentKeys = (entries: [string, string][]): SentSteps => {
+  const legacy = entries.filter(([k]) => k in LEGACY_KEYS);
+  const modern = entries.filter(([k]) => !(k in LEGACY_KEYS));
+  const out: SentSteps = {};
+  for (const [k, v] of legacy) out[LEGACY_KEYS[k]] = v;
+  for (const [k, v] of modern) out[k] = v;
+  return out;
+};
+
 export const readSentSteps = (raw: unknown): SentSteps => {
   if (Array.isArray(raw)) {
-    return Object.fromEntries(raw.filter((k): k is string => typeof k === 'string').map((k) => [k, '']));
+    return remapLegacySentKeys(
+      raw.filter((k): k is string => typeof k === 'string').map((k) => [k, '']),
+    );
   }
   if (raw && typeof raw === 'object') {
-    return Object.fromEntries(
+    return remapLegacySentKeys(
       Object.entries(raw as Record<string, unknown>).map(([k, v]) => [k, typeof v === 'string' ? v : '']),
     );
   }
