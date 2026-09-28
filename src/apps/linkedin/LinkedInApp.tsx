@@ -142,6 +142,16 @@ export const LinkedInApp: React.FC<{
 
       <div className="flex-1 max-w-6xl w-full mx-auto px-6 py-6 grid lg:grid-cols-[320px_1fr] gap-6 overflow-hidden">
         <div className="overflow-y-auto pr-1">
+          {due.length > 0 && !showDue && (
+            // The only way back once "Hide" was clicked used to be reloading
+            // the page — a collapse with no expand is just a delete.
+            <button
+              onClick={() => setShowDue(true)}
+              className="mb-4 w-full text-left rounded-xl border border-linkedin-200 dark:border-linkedin-800 bg-linkedin-50/60 dark:bg-linkedin-900/20 p-3 text-xs font-bold uppercase tracking-wide text-linkedin-700 dark:text-linkedin-300 hover:bg-linkedin-100 dark:hover:bg-linkedin-900/40"
+            >
+              Show due now ({due.length})
+            </button>
+          )}
           {due.length > 0 && showDue && (
             <div className="mb-4 rounded-xl border border-linkedin-200 dark:border-linkedin-800 bg-linkedin-50/60 dark:bg-linkedin-900/20 p-3">
               <div className="flex items-center justify-between mb-2">
@@ -150,8 +160,16 @@ export const LinkedInApp: React.FC<{
                 </h2>
                 <button onClick={() => setShowDue(false)} className="text-xs text-gray-500 hover:text-gray-700">Hide</button>
               </div>
-              <div className="space-y-1.5">
-                {due.slice(0, 8).map((c) => (
+              {/*
+                Every due lead, not a peek of 8. The operator asked to see
+                exactly who needs a touch today-or-earlier, in one collapsible
+                list — an "and N more" that never expands answers a different
+                question. `due` is already correctly date-filtered by
+                dueQueue/isDue (a lead scheduled for tomorrow never appears
+                here), so nothing further to exclude, just to stop truncating.
+              */}
+              <div className="space-y-1.5 max-h-[70vh] overflow-y-auto">
+                {due.map((c) => (
                   <button
                     key={c.lead.id}
                     onClick={() => { setSelectedId(c.lead.id); setFocusStep(c.next?.step.key); }}
@@ -168,9 +186,6 @@ export const LinkedInApp: React.FC<{
                     </span>
                   </button>
                 ))}
-                {due.length > 8 && (
-                  <p className="text-[11px] text-gray-500 dark:text-gray-400 px-2">and {due.length - 8} more</p>
-                )}
               </div>
             </div>
           )}
