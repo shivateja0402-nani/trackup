@@ -85,7 +85,13 @@ export const LinkedInApp: React.FC<{
   const [showAdd, setShowAdd] = useState(false);
   const [starterSeed, setStarterSeed] = useState<string | undefined>(undefined);
   const [showImport, setShowImport] = useState(false);
-  const [showDue, setShowDue] = useState(true);
+  // Which list is showing, not whether a panel is open. A separate inline
+  // "due" list next to the full one was the wrong shape entirely: it either
+  // truncated the very thing the operator opened it to see, or — shown in
+  // full — dumped a thousand-plus rows onto the first screen they see every
+  // morning, which is demoralising before they have sent a single message.
+  // One list, filtered, is a small tile away from either view.
+  const [listFilter, setListFilter] = useState<'all' | 'due'>('all');
   const selected = leads.find((l) => l.id === selectedId) ?? null;
 
   // "Who do I message today" is the question an operator actually has every
@@ -101,6 +107,15 @@ export const LinkedInApp: React.FC<{
       leads.map((l) => cadenceFor(l, LINKEDIN_PACK, readSentSteps(l.sent_steps), now)),
     );
   }, [leads]);
+  const dueStepByLeadId = useMemo(
+    () => new Map(due.map((c) => [c.lead.id, c.next?.step.key])),
+    [due],
+  );
+  const dueMetaByLeadId = useMemo(
+    () => new Map(due.map((c) => [c.lead.id, c])),
+    [due],
+  );
+  const visibleLeads = listFilter === 'due' ? due.map((c) => c.lead) : leads;
 
   return (
     <div className="min-h-screen flex flex-col app-canvas accent-linkedin">
@@ -142,66 +157,49 @@ export const LinkedInApp: React.FC<{
 
       <div className="flex-1 max-w-6xl w-full mx-auto px-6 py-6 grid lg:grid-cols-[320px_1fr] gap-6 overflow-hidden">
         <div className="overflow-y-auto pr-1">
-          {due.length > 0 && !showDue && (
-            // The only way back once "Hide" was clicked used to be reloading
-            // the page — a collapse with no expand is just a delete.
+          {due.length > 0 && (
+            // One line, click to filter the list below into just this —
+            // never a second list rendered inline. A dashboard that opens
+            // onto a wall of a thousand "due" rows is not a queue, it is a
+            // wall, and nobody starts their morning by climbing one.
             <button
-              onClick={() => setShowDue(true)}
-              className="mb-4 w-full text-left rounded-xl border border-linkedin-200 dark:border-linkedin-800 bg-linkedin-50/60 dark:bg-linkedin-900/20 p-3 text-xs font-bold uppercase tracking-wide text-linkedin-700 dark:text-linkedin-300 hover:bg-linkedin-100 dark:hover:bg-linkedin-900/40"
+              onClick={() => setListFilter(listFilter === 'due' ? 'all' : 'due')}
+              className={`mb-4 w-full flex items-center justify-between rounded-xl border p-3 text-left transition-colors ${
+                listFilter === 'due'
+                  ? 'border-linkedin-400 bg-linkedin-100 dark:bg-linkedin-900/40'
+                  : 'border-linkedin-200 dark:border-linkedin-800 bg-linkedin-50/60 dark:bg-linkedin-900/20 hover:bg-linkedin-100 dark:hover:bg-linkedin-900/30'
+              }`}
             >
-              Show due now ({due.length})
+              <span className="text-xs font-bold uppercase tracking-wide text-linkedin-700 dark:text-linkedin-300">
+                Due now ({due.length})
+              </span>
+              <span className="text-xs text-linkedin-600 dark:text-linkedin-400">
+                {listFilter === 'due' ? 'Show all leads' : 'View'} →
+              </span>
             </button>
           )}
-          {due.length > 0 && showDue && (
-            <div className="mb-4 rounded-xl border border-linkedin-200 dark:border-linkedin-800 bg-linkedin-50/60 dark:bg-linkedin-900/20 p-3">
-              <div className="flex items-center justify-between mb-2">
-                <h2 className="text-xs font-bold uppercase tracking-wide text-linkedin-700 dark:text-linkedin-300">
-                  Due now ({due.length})
-                </h2>
-                <button onClick={() => setShowDue(false)} className="text-xs text-gray-500 hover:text-gray-700">Hide</button>
-              </div>
-              {/*
-                Every due lead, not a peek of 8. The operator asked to see
-                exactly who needs a touch today-or-earlier, in one collapsible
-                list — an "and N more" that never expands answers a different
-                question. `due` is already correctly date-filtered by
-                dueQueue/isDue (a lead scheduled for tomorrow never appears
-                here), so nothing further to exclude, just to stop truncating.
-              */}
-              <div className="space-y-1.5 max-h-[70vh] overflow-y-auto">
-                {due.map((c) => (
-                  <button
-                    key={c.lead.id}
-                    onClick={() => { setSelectedId(c.lead.id); setFocusStep(c.next?.step.key); }}
-                    className="w-full text-left px-2 py-1.5 rounded-lg hover:bg-white dark:hover:bg-gray-800"
-                  >
-                    <span className="text-sm font-medium text-gray-900 dark:text-white">{c.lead.name}</span>
-                    <span className="block text-[11px] text-gray-500 dark:text-gray-400">
-                      {c.next?.step.label}
-                      {c.daysOverdue > 0
-                        ? ` · ${c.daysOverdue} day${c.daysOverdue === 1 ? '' : 's'} late`
-                        : c.next?.dueAt
-                          ? ' · due today'
-                          : ' · not started'}
-                    </span>
-                  </button>
-                ))}
-              </div>
-            </div>
-          )}
-          <h2 className="text-sm font-semibold text-gray-500 uppercase tracking-wide mb-3">Leads ({leads.length})</h2>
+          <h2 className="text-sm font-semibold text-gray-500 uppercase tracking-wide mb-3">
+            {listFilter === 'due' ? `Due now (${visibleLeads.length})` : `Leads (${leads.length})`}
+          </h2>
           {loading ? (
             <div className="text-sm text-gray-400 p-4">Loading…</div>
-          ) : leads.length === 0 ? (
+          ) : visibleLeads.length === 0 ? (
             <div className="text-sm text-gray-500 dark:text-gray-400 card-modern p-6 text-center">
-              No leads yet. Click <span className="font-semibold">Add lead</span>.
+              {listFilter === 'due'
+                ? 'Nothing due right now.'
+                : <>No leads yet. Click <span className="font-semibold">Add lead</span>.</>}
             </div>
           ) : (
             <div className="space-y-2">
-              {leads.map((lead) => (
+              {visibleLeads.map((lead) => {
+                const dueMeta = dueMetaByLeadId.get(lead.id);
+                return (
                 <button
                   key={lead.id}
-                  onClick={() => { setSelectedId(lead.id); setFocusStep(undefined); }}
+                  onClick={() => {
+                    setSelectedId(lead.id);
+                    setFocusStep(listFilter === 'due' ? dueStepByLeadId.get(lead.id) : undefined);
+                  }}
                   className={`w-full text-left p-4 rounded-xl border transition-all ${
                     selectedId === lead.id
                       ? 'border-linkedin-400 bg-linkedin-50 dark:bg-linkedin-900/20'
@@ -217,13 +215,23 @@ export const LinkedInApp: React.FC<{
                   <p className="text-xs text-gray-500 dark:text-gray-400 truncate mt-0.5">
                     {[lead.job_title, lead.company_name].filter(Boolean).join(' · ') || lead.linkedin_url}
                   </p>
-                  {lead.outreach && (
+                  {listFilter === 'due' && dueMeta ? (
+                    <p className="text-[11px] text-linkedin-600 dark:text-linkedin-400 mt-1">
+                      {dueMeta.next?.step.label}
+                      {dueMeta.daysOverdue > 0
+                        ? ` · ${dueMeta.daysOverdue} day${dueMeta.daysOverdue === 1 ? '' : 's'} late`
+                        : dueMeta.next?.dueAt
+                          ? ' · due today'
+                          : ' · not started'}
+                    </p>
+                  ) : lead.outreach && (
                     <p className="text-[11px] text-linkedin-600 dark:text-linkedin-400 mt-1 flex items-center">
                       <Sparkles className="w-3 h-3 mr-1" /> Flow ready
                     </p>
                   )}
                 </button>
-              ))}
+                );
+              })}
             </div>
           )}
         </div>

@@ -36,6 +36,21 @@ export interface LeadCadence {
   daysOverdue: number;
   /** Set when the cadence is deliberately not running. */
   haltedBecause: string | null;
+  /**
+   * `next` has no due date, but this is NOT a fresh lead — something in this
+   * sequence was already sent, under tracking too old to carry a timestamp.
+   *
+   * A never-started lead with no date is correctly "due now": nothing has
+   * happened yet, so today is as good a day as any. A lead that is four steps
+   * into a real conversation with only its timestamp missing is a different
+   * thing entirely, and defaulting it to "due now" is how a migrated account
+   * ends up with hundreds of already-progressed leads flooding today's queue
+   * — the operator cannot tell a stale unknown from something genuinely
+   * urgent, so the queue stops being usable at exactly the volume it exists
+   * to manage. Surfaced separately so it can be shown, and counted, as its
+   * own thing rather than silently inflating "due now".
+   */
+  unknownSchedule: boolean;
 }
 
 const startOfDay = (d: Date): number => new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
@@ -120,18 +135,31 @@ export const cadenceForRow = (
 
   const firstUnsent = due.find((d) => !d.sent) ?? null;
   const next = haltedBecause ? null : firstUnsent;
+  const hasPriorProgress = due.some((d) => d.sent);
+  const unknownSchedule = !haltedBecause && next != null && next.dueAt === null && hasPriorProgress;
 
   return {
     steps: due,
     next,
     daysOverdue: next?.daysUntilDue != null ? Math.max(0, -next.daysUntilDue) : 0,
     haltedBecause,
+    unknownSchedule,
   };
 };
 
-/** True when this lead wants action today. */
-export const isDue = (c: Pick<LeadCadence, 'haltedBecause' | 'next'>): boolean =>
-  !c.haltedBecause && c.next != null && (c.next.daysUntilDue == null || c.next.daysUntilDue <= 0);
+/**
+ * True when this lead wants action today.
+ *
+ * A dateless `next` only counts as due when nothing about this lead has been
+ * sent yet — see `unknownSchedule` for the other case, which this
+ * deliberately excludes so a migrated account's untimed history does not
+ * read as hundreds of things due today.
+ */
+export const isDue = (c: Pick<LeadCadence, 'haltedBecause' | 'next' | 'unknownSchedule'>): boolean =>
+  !c.haltedBecause &&
+  c.next != null &&
+  !c.unknownSchedule &&
+  (c.next.daysUntilDue == null || c.next.daysUntilDue <= 0);
 
 /**
  * Everything wanting action, most overdue first.
