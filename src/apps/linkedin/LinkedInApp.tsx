@@ -76,38 +76,56 @@ const normalizeSentSteps = (raw: Lead['sent_steps'], acceptedAt: string | null |
   return raw;
 };
 
-type StepSchedule = { due: Date | null; blockedByTitle: string | null };
+type StepSchedule = { due: Date | null };
+
+// Cumulative days from `accepted_at` for each SEQUENCE index, e.g. opener=0,
+// value=2, cta=4, bump=7 — the "on schedule" projection when nothing has
+// slipped. Index 0 (connection_note) is unused since it has no gapDays.
+const CUMULATIVE_OFFSET_DAYS: number[] = (() => {
+  const out: number[] = [];
+  let sum = 0;
+  for (const step of SEQUENCE) { sum += step.gapDays ?? 0; out.push(sum); }
+  return out;
+})();
 
 /**
- * Chains each step's due date off the previous step's ACTUAL sent timestamp
- * (opener chains off `accepted_at` instead, since that's a real event too).
- * A step with no computable anchor yet — its predecessor hasn't been sent —
- * comes back with `due: null` and the predecessor's title, so the UI can show
- * "waiting on X" instead of a stale, already-overdue date.
+ * Projects every remaining step's due date, re-anchored on whichever step was
+ * MOST RECENTLY actually sent — not the immediate next one. So marking opener
+ * sent late shifts value, cta, AND bump together, and if value later also
+ * slips, sending it re-anchors cta and bump again from that real date.
  */
 const computeSequenceSchedule = (lead: Lead, sentSteps: SentSteps): Record<string, StepSchedule> => {
   const schedule: Record<string, StepSchedule> = {};
+  if (!lead.accepted_at) {
+    for (const step of SEQUENCE) schedule[step.key] = { due: null };
+    return schedule;
+  }
+  let anchorAt = lead.accepted_at;
+  let anchorIndex = 0;
+  for (let i = 1; i < SEQUENCE.length; i++) {
+    const sentAt = sentSteps[SEQUENCE[i].key];
+    if (sentAt) { anchorAt = sentAt; anchorIndex = i; }
+  }
   for (let i = 0; i < SEQUENCE.length; i++) {
     const step = SEQUENCE[i];
-    if (step.gapDays === null) { schedule[step.key] = { due: null, blockedByTitle: null }; continue; }
-    const prev = SEQUENCE[i - 1];
-    const anchor = i === 1 ? lead.accepted_at ?? null : prev ? sentSteps[prev.key] ?? null : null;
-    schedule[step.key] = anchor
-      ? { due: dueDateFor(anchor, step.gapDays), blockedByTitle: null }
-      : { due: null, blockedByTitle: i === 1 ? null : prev?.title.replace(/^\d+ · /, '') ?? null };
+    if (step.gapDays === null) { schedule[step.key] = { due: null }; continue; }
+    const daysFromAnchor = CUMULATIVE_OFFSET_DAYS[i] - CUMULATIVE_OFFSET_DAYS[anchorIndex];
+    schedule[step.key] = { due: dueDateFor(anchorAt, daysFromAnchor) };
   }
   return schedule;
 };
 
 /** The earliest unsent step that has a due date, for the list summary. */
-const nextDueStep = (lead: Lead): { title: string; due: Date | null; blockedByTitle: string | null } | null => {
+const nextDueStep = (lead: Lead): { title: string; due: Date } | null => {
   if (!lead.outreach || !lead.accepted_at) return null;
   const sentSteps = normalizeSentSteps(lead.sent_steps, lead.accepted_at);
   const schedule = computeSequenceSchedule(lead, sentSteps);
   for (const step of SEQUENCE) {
     if (step.gapDays === null || sentSteps[step.key]) continue;
     if (!lead.outreach[step.key]) continue;
-    return { title: step.title.replace(/^\d+ · /, ''), ...schedule[step.key] };
+    const due = schedule[step.key].due;
+    if (!due) continue;
+    return { title: step.title.replace(/^\d+ · /, ''), due };
   }
   return null;
 };
@@ -171,14 +189,22 @@ export const LinkedInApp: React.FC<{ onExit: () => void }> = ({ onExit }) => {
   const { leads, loading, addLead, updateLead, deleteLead } = useLeads();
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [showAdd, setShowAdd] = useState(false);
-  const [filter, setFilter] = useState<LeadStatus | null>(null);
+  const [filter, setFilter] = useState<LeadStatus | 'due' | null>(null);
   const selected = leads.find((l) => l.id === selectedId) ?? null;
 
   const counts = STATUS_ORDER.reduce(
     (acc, s) => ({ ...acc, [s]: leads.filter((l) => l.status === s).length }),
     {} as Record<LeadStatus, number>,
   );
-  const visibleLeads = filter ? leads.filter((l) => l.status === filter) : leads;
+  // "Due" = the lead's next unsent step is due today or already overdue —
+  // everything due up through today, not just today's exact date.
+  const isDue = (lead: Lead): boolean => {
+    const next = nextDueStep(lead);
+    return !!next && daysUntil(next.due) <= 0;
+  };
+  const dueCount = leads.filter(isDue).length;
+  const visibleLeads =
+    filter === 'due' ? leads.filter(isDue) : filter ? leads.filter((l) => l.status === filter) : leads;
 
   return (
     <div className="min-h-screen flex flex-col bg-gradient-to-br from-linkedin-50/50 to-white dark:from-gray-900 dark:to-gray-950">
@@ -236,6 +262,22 @@ export const LinkedInApp: React.FC<{ onExit: () => void }> = ({ onExit }) => {
                   </button>
                 );
               })}
+              <button
+                onClick={() => setFilter(filter === 'due' ? null : 'due')}
+                aria-pressed={filter === 'due'}
+                title={`${dueCount} due today or overdue`}
+                className={`inline-flex items-center gap-1.5 text-[11px] font-semibold px-2 py-1 rounded-lg border transition-colors ${
+                  filter === 'due'
+                    ? 'bg-red-600 border-red-600 text-white'
+                    : dueCount === 0
+                      ? 'bg-transparent border-gray-200 dark:border-gray-700 text-gray-400 dark:text-gray-600'
+                      : 'bg-white dark:bg-gray-800/50 border-red-200 dark:border-red-900/50 text-red-600 dark:text-red-400 hover:border-red-300'
+                }`}
+              >
+                <Clock className="w-3 h-3" />
+                Due
+                <span className={filter === 'due' ? 'text-white' : 'font-bold'}>{dueCount}</span>
+              </button>
             </div>
           )}
 
@@ -247,7 +289,7 @@ export const LinkedInApp: React.FC<{ onExit: () => void }> = ({ onExit }) => {
             </div>
           ) : visibleLeads.length === 0 ? (
             <div className="text-sm text-gray-500 dark:text-gray-400 card-modern p-6 text-center">
-              No leads in <span className="font-semibold">{STATUS_LABELS[filter as LeadStatus]}</span>.
+              No leads in <span className="font-semibold">{filter === 'due' ? 'Due' : STATUS_LABELS[filter as LeadStatus]}</span>.
             </div>
           ) : (
             <div className="space-y-2">
@@ -276,17 +318,6 @@ export const LinkedInApp: React.FC<{ onExit: () => void }> = ({ onExit }) => {
                       return (
                         <p className="text-[11px] text-linkedin-600 dark:text-linkedin-400 mt-1 flex items-center">
                           <Sparkles className="w-3 h-3 mr-1" /> Flow ready
-                        </p>
-                      );
-                    }
-                    if (!next.due) {
-                      return (
-                        <p className="text-[11px] mt-1 flex items-center gap-1.5">
-                          <Clock className="w-3 h-3 flex-shrink-0 text-gray-400" />
-                          <span className="font-semibold text-gray-500 dark:text-gray-400">{next.title}</span>
-                          <span className="text-gray-400 dark:text-gray-500 truncate">
-                            waiting on {next.blockedByTitle ?? 'a prior step'}
-                          </span>
                         </p>
                       );
                     }
@@ -418,22 +449,19 @@ const LeadDetail: React.FC<{
   };
 
   // `hasSchedule` false = no date at all (only the connection request, which
-  // goes out before there's anything to anchor on). `due`/`blockedByTitle`
-  // come precomputed from computeSequenceSchedule so this only renders them.
+  // goes out before there's anything to anchor on). `due` comes precomputed
+  // from computeSequenceSchedule so this only renders it.
   const Step: React.FC<{
     id: string; title: string; text: string;
     track?: boolean; tone?: 'positive' | 'objection';
-    hasSchedule?: boolean; due?: Date | null; blockedByTitle?: string | null; awaitingReply?: boolean;
-  }> = ({ id, title, text, track = true, tone, hasSchedule = false, due = null, blockedByTitle = null, awaitingReply = false }) => {
+    hasSchedule?: boolean; due?: Date | null; awaitingReply?: boolean;
+  }> = ({ id, title, text, track = true, tone, hasSchedule = false, due = null, awaitingReply = false }) => {
     const isSent = Boolean(sentSteps[id]);
 
     const schedule = (() => {
       if (!hasSchedule) return null;
       if (isSent) {
         return <span className="text-[11px] font-semibold px-2 py-0.5 rounded-full bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-300">Sent</span>;
-      }
-      if (blockedByTitle) {
-        return <span className="text-[11px] font-medium text-gray-400 dark:text-gray-500">Waiting on {blockedByTitle}</span>;
       }
       if (!due) {
         return <span className="text-[11px] font-medium text-gray-400 dark:text-gray-500">Scheduled once they accept</span>;
@@ -527,7 +555,7 @@ const LeadDetail: React.FC<{
             <Step
               key={s.key} id={s.key} title={s.title} text={flow[s.key]}
               hasSchedule={s.gapDays !== null}
-              due={sequenceSchedule[s.key].due} blockedByTitle={sequenceSchedule[s.key].blockedByTitle}
+              due={sequenceSchedule[s.key].due}
             />
           ))}
           <h3 className="text-sm font-semibold text-gray-500 uppercase tracking-wide pt-1">If they reply</h3>
