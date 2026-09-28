@@ -34,9 +34,31 @@ export const useOutreachRows = (): OutreachRows => {
     (async () => {
       if (!user) { setLoading(false); return; }
       try {
+        // PostgREST caps a single response at its max_rows setting (1000 by
+        // default), so a lone select() silently truncates past that count.
+        // Page through with .range() until a page comes back short — the
+        // same fix useLeads/useProspects/DataContext already carry. This
+        // hook feeds the home screen's queue, receipt and per-app stat
+        // cards, so missing it here undercounted all three at once.
+        const PAGE_SIZE = 1000;
+        const fetchAll = async <T,>(table: 'leads' | 'prospects'): Promise<{ data: T[]; error: Error | null }> => {
+          const all: T[] = [];
+          for (let from = 0; ; from += PAGE_SIZE) {
+            const { data, error } = await supabase
+              .from(table)
+              .select('*')
+              .eq('user_id', user.id)
+              .range(from, from + PAGE_SIZE - 1);
+            if (error) return { data: all, error };
+            all.push(...((data as T[]) ?? []));
+            if (!data || data.length < PAGE_SIZE) break;
+          }
+          return { data: all, error: null };
+        };
+
         const [l, p] = await Promise.all([
-          supabase.from('leads').select('*').eq('user_id', user.id),
-          supabase.from('prospects').select('*').eq('user_id', user.id),
+          fetchAll<Lead>('leads'),
+          fetchAll<Prospect>('prospects'),
         ]);
         if (!active) return;
         /*
@@ -50,8 +72,8 @@ export const useOutreachRows = (): OutreachRows => {
         */
         const failed = [l.error, p.error].filter(Boolean);
         setLoadError(failed.length ? failed.map((e) => e!.message).join('; ') : null);
-        setLeads((l.data as Lead[]) ?? []);
-        setProspects((p.data as Prospect[]) ?? []);
+        setLeads(l.data);
+        setProspects(p.data);
       } catch (err) {
         /*
           A REJECTED promise, as opposed to one that resolves carrying an
