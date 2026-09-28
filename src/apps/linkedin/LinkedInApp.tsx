@@ -15,14 +15,19 @@ const STATUS_LABELS: Record<LeadStatus, string> = {
 };
 const STATUS_ORDER: LeadStatus[] = ['new', 'requested', 'connected', 'replied', 'meeting'];
 
-// `dueAfterDays` counts from the day they accept (status → connected). The
-// connection request goes out before that, so it has no due date.
-const SEQUENCE: { key: keyof OutreachFlow; title: string; dueAfterDays: number | null }[] = [
-  { key: 'connection_note', title: '1 · Connection request', dueAfterDays: null },
-  { key: 'opener', title: '2 · Opener (after they accept)', dueAfterDays: 0 },
-  { key: 'value', title: '3 · Value', dueAfterDays: 2 },
-  { key: 'cta', title: '4 · Call to action', dueAfterDays: 4 },
-  { key: 'bump', title: '5 · Bump (no reply)', dueAfterDays: 7 },
+// `gapDays` counts from when the PREVIOUS step actually went out — opener
+// anchors on accepting (status → connected), since that's the real event that
+// starts the clock; everything after it anchors on the prior step's own sent
+// timestamp, not a fixed offset from acceptance. That way a late opener pushes
+// value/cta/bump's dates with it instead of leaving them all stuck "overdue"
+// the moment they were computed. The connection request itself has no date —
+// it goes out before there's anything to anchor on.
+const SEQUENCE: { key: keyof OutreachFlow; title: string; gapDays: number | null }[] = [
+  { key: 'connection_note', title: '1 · Connection request', gapDays: null },
+  { key: 'opener', title: '2 · Opener (after they accept)', gapDays: 0 },
+  { key: 'value', title: '3 · Value', gapDays: 2 },
+  { key: 'cta', title: '4 · Call to action', gapDays: 2 },
+  { key: 'bump', title: '5 · Bump (no reply)', gapDays: 3 },
 ];
 
 // The reply branches get due dates too. They anchor on `replied_at` once a reply
@@ -54,14 +59,55 @@ const describeDue = (date: Date): { label: string; tone: DueTone } => {
   return { label: `Due in ${diff}d · ${shortDate(date)}`, tone: 'upcoming' };
 };
 
+type SentSteps = Record<string, string>;
+
+/**
+ * `sent_steps` used to be a plain string[] (sent, but no record of when).
+ * Legacy rows in that shape fall back to `accepted_at` as their sent time —
+ * the best guess available, and what the old fixed-offset logic assumed
+ * anyway — so they don't suddenly show every downstream step as "waiting".
+ */
+const normalizeSentSteps = (raw: Lead['sent_steps'], acceptedAt: string | null | undefined): SentSteps => {
+  if (!raw) return {};
+  if (Array.isArray(raw)) {
+    const at = acceptedAt ?? new Date().toISOString();
+    return Object.fromEntries(raw.map((key) => [key, at]));
+  }
+  return raw;
+};
+
+type StepSchedule = { due: Date | null; blockedByTitle: string | null };
+
+/**
+ * Chains each step's due date off the previous step's ACTUAL sent timestamp
+ * (opener chains off `accepted_at` instead, since that's a real event too).
+ * A step with no computable anchor yet — its predecessor hasn't been sent —
+ * comes back with `due: null` and the predecessor's title, so the UI can show
+ * "waiting on X" instead of a stale, already-overdue date.
+ */
+const computeSequenceSchedule = (lead: Lead, sentSteps: SentSteps): Record<string, StepSchedule> => {
+  const schedule: Record<string, StepSchedule> = {};
+  for (let i = 0; i < SEQUENCE.length; i++) {
+    const step = SEQUENCE[i];
+    if (step.gapDays === null) { schedule[step.key] = { due: null, blockedByTitle: null }; continue; }
+    const prev = SEQUENCE[i - 1];
+    const anchor = i === 1 ? lead.accepted_at ?? null : prev ? sentSteps[prev.key] ?? null : null;
+    schedule[step.key] = anchor
+      ? { due: dueDateFor(anchor, step.gapDays), blockedByTitle: null }
+      : { due: null, blockedByTitle: i === 1 ? null : prev?.title.replace(/^\d+ · /, '') ?? null };
+  }
+  return schedule;
+};
+
 /** The earliest unsent step that has a due date, for the list summary. */
-const nextDueStep = (lead: Lead): { title: string; date: Date } | null => {
+const nextDueStep = (lead: Lead): { title: string; due: Date | null; blockedByTitle: string | null } | null => {
   if (!lead.outreach || !lead.accepted_at) return null;
-  const sent = lead.sent_steps ?? [];
+  const sentSteps = normalizeSentSteps(lead.sent_steps, lead.accepted_at);
+  const schedule = computeSequenceSchedule(lead, sentSteps);
   for (const step of SEQUENCE) {
-    if (step.dueAfterDays === null || sent.includes(step.key)) continue;
+    if (step.gapDays === null || sentSteps[step.key]) continue;
     if (!lead.outreach[step.key]) continue;
-    return { title: step.title.replace(/^\d+ · /, ''), date: dueDateFor(lead.accepted_at, step.dueAfterDays) };
+    return { title: step.title.replace(/^\d+ · /, ''), ...schedule[step.key] };
   }
   return null;
 };
@@ -233,7 +279,18 @@ export const LinkedInApp: React.FC<{ onExit: () => void }> = ({ onExit }) => {
                         </p>
                       );
                     }
-                    const { label, tone } = describeDue(next.date);
+                    if (!next.due) {
+                      return (
+                        <p className="text-[11px] mt-1 flex items-center gap-1.5">
+                          <Clock className="w-3 h-3 flex-shrink-0 text-gray-400" />
+                          <span className="font-semibold text-gray-500 dark:text-gray-400">{next.title}</span>
+                          <span className="text-gray-400 dark:text-gray-500 truncate">
+                            waiting on {next.blockedByTitle ?? 'a prior step'}
+                          </span>
+                        </p>
+                      );
+                    }
+                    const { label, tone } = describeDue(next.due);
                     return (
                       <p className="text-[11px] mt-1 flex items-center gap-1.5">
                         <Clock className={`w-3 h-3 flex-shrink-0 ${tone === 'overdue' ? 'text-red-500' : tone === 'today' ? 'text-amber-500' : 'text-gray-400'}`} />
@@ -285,14 +342,19 @@ const LeadDetail: React.FC<{
   const [error, setError] = useState('');
   const [copied, setCopied] = useState<string | null>(null);
   const flow = lead.outreach;
-  const sentSteps = lead.sent_steps ?? [];
+  const sentSteps = normalizeSentSteps(lead.sent_steps, lead.accepted_at);
+  const sequenceSchedule = computeSequenceSchedule(lead, sentSteps);
 
   const copy = async (text: string, id: string) => {
     try { await navigator.clipboard.writeText(text); setCopied(id); setTimeout(() => setCopied(null), 1500); } catch { /* */ }
   };
 
+  // Recording exactly when a step went out is what lets the next step's date
+  // shift with it — toggling off clears that step's timestamp again.
   const toggleSent = (key: string) => {
-    const next = sentSteps.includes(key) ? sentSteps.filter((k) => k !== key) : [...sentSteps, key];
+    const next = { ...sentSteps };
+    if (next[key]) delete next[key];
+    else next[key] = new Date().toISOString();
     onUpdate(lead.id, { sent_steps: next });
   };
 
@@ -355,22 +417,23 @@ const LeadDetail: React.FC<{
     }
   };
 
-  // `dueAfterDays` null = no schedule (only the connection request, which goes out
-  // before there is an anchor to count from). `anchorAt` lets the reply branches
-  // re-anchor on the reply date once one is logged.
+  // `hasSchedule` false = no date at all (only the connection request, which
+  // goes out before there's anything to anchor on). `due`/`blockedByTitle`
+  // come precomputed from computeSequenceSchedule so this only renders them.
   const Step: React.FC<{
     id: string; title: string; text: string;
     track?: boolean; tone?: 'positive' | 'objection';
-    dueAfterDays?: number | null; anchorAt?: string | null; awaitingReply?: boolean;
-  }> = ({ id, title, text, track = true, tone, dueAfterDays = null, anchorAt, awaitingReply = false }) => {
-    const isSent = sentSteps.includes(id);
-    const anchor = anchorAt === undefined ? lead.accepted_at : anchorAt;
-    const due = dueAfterDays !== null && anchor ? dueDateFor(anchor, dueAfterDays) : null;
+    hasSchedule?: boolean; due?: Date | null; blockedByTitle?: string | null; awaitingReply?: boolean;
+  }> = ({ id, title, text, track = true, tone, hasSchedule = false, due = null, blockedByTitle = null, awaitingReply = false }) => {
+    const isSent = Boolean(sentSteps[id]);
 
     const schedule = (() => {
-      if (dueAfterDays === null) return null;
+      if (!hasSchedule) return null;
       if (isSent) {
         return <span className="text-[11px] font-semibold px-2 py-0.5 rounded-full bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-300">Sent</span>;
+      }
+      if (blockedByTitle) {
+        return <span className="text-[11px] font-medium text-gray-400 dark:text-gray-500">Waiting on {blockedByTitle}</span>;
       }
       if (!due) {
         return <span className="text-[11px] font-medium text-gray-400 dark:text-gray-500">Scheduled once they accept</span>;
@@ -445,7 +508,7 @@ const LeadDetail: React.FC<{
         {lead.accepted_at && (
           <p className="mt-3 text-xs text-gray-500 dark:text-gray-400 flex items-center">
             <Clock className="w-3.5 h-3.5 mr-1.5 text-linkedin-500" />
-            Accepted {shortDate(new Date(lead.accepted_at))} — sequence dates count from here.
+            Accepted {shortDate(new Date(lead.accepted_at))} — each step's date counts from when the one before it was actually sent.
           </p>
         )}
         {error && <div className="mt-3 text-sm text-red-600 dark:text-red-400 bg-red-50 dark:bg-red-900/20 p-3 rounded-lg border border-red-200 dark:border-red-800">{error}</div>}
@@ -461,18 +524,24 @@ const LeadDetail: React.FC<{
           )}
           <h3 className="text-sm font-semibold text-gray-500 uppercase tracking-wide pt-1">Sequence</h3>
           {SEQUENCE.map((s) => (
-            <Step key={s.key} id={s.key} title={s.title} text={flow[s.key]} dueAfterDays={s.dueAfterDays} />
+            <Step
+              key={s.key} id={s.key} title={s.title} text={flow[s.key]}
+              hasSchedule={s.gapDays !== null}
+              due={sequenceSchedule[s.key].due} blockedByTitle={sequenceSchedule[s.key].blockedByTitle}
+            />
           ))}
           <h3 className="text-sm font-semibold text-gray-500 uppercase tracking-wide pt-1">If they reply</h3>
           <Step
             id="reply_positive" title="Positive / interested" text={flow.reply_positive}
             tone="positive" track={false}
-            dueAfterDays={REPLY_DUE_AFTER_DAYS} anchorAt={replyAnchor} awaitingReply={!lead.replied_at}
+            hasSchedule due={replyAnchor ? dueDateFor(replyAnchor, REPLY_DUE_AFTER_DAYS) : null}
+            awaitingReply={!lead.replied_at}
           />
           <Step
             id="reply_objection" title="Objection / not now" text={flow.reply_objection}
             tone="objection" track={false}
-            dueAfterDays={REPLY_DUE_AFTER_DAYS} anchorAt={replyAnchor} awaitingReply={!lead.replied_at}
+            hasSchedule due={replyAnchor ? dueDateFor(replyAnchor, REPLY_DUE_AFTER_DAYS) : null}
+            awaitingReply={!lead.replied_at}
           />
         </>
       ) : (

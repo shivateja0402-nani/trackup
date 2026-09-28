@@ -42,7 +42,13 @@ export interface Lead {
   potential_services?: string | null;
   outreach?: OutreachFlow | null;
   profile?: LeadProfile | null;
-  sent_steps?: string[] | null;
+  /**
+   * Which sequence steps have been sent. Stored as { stepKey: isoTimestamp }
+   * so later steps can be scheduled from when the previous one actually went
+   * out. Older rows may still hold the legacy `string[]` shape (sent, but no
+   * timestamp) — normalizeSentSteps() in LinkedInApp.tsx handles both.
+   */
+  sent_steps?: Record<string, string> | string[] | null;
   status: LeadStatus;
   /** When they accepted the connection request. Anchors the sequence due dates. */
   accepted_at?: string | null;
