@@ -16,21 +16,37 @@ export const useLeads = () => {
   const fetchLeads = useCallback(async () => {
     if (!user) return;
     setLoading(true);
-    const { data, error } = await supabase
-      .from('leads')
-      .select('*')
-      .eq('user_id', user.id)
-      .order('created_at', { ascending: false });
 
-    if (error) {
+    // PostgREST caps a single response at its max_rows setting (1000 by
+    // default), so a lone select() silently truncates past that count. Page
+    // through with .range() until a page comes back short.
+    const PAGE_SIZE = 1000;
+    const all: Lead[] = [];
+    let pageError: string | null = null;
+    for (let from = 0; ; from += PAGE_SIZE) {
+      const { data, error } = await supabase
+        .from('leads')
+        .select('*')
+        .eq('user_id', user.id)
+        .order('created_at', { ascending: false })
+        .range(from, from + PAGE_SIZE - 1);
+      if (error) {
+        pageError = error.message;
+        break;
+      }
+      all.push(...((data as Lead[]) ?? []));
+      if (!data || data.length < PAGE_SIZE) break;
+    }
+
+    if (pageError) {
       // A failed read must never look like an empty account. Keep whatever is
       // already on screen and surface the failure instead of rendering
       // "No leads yet" over a list the user knows exists.
-      console.error('Error fetching leads:', error);
-      setLoadError(error.message);
+      console.error('Error fetching leads:', pageError);
+      setLoadError(pageError);
     } else {
       setLoadError(null);
-      setLeads((data as Lead[]) ?? []);
+      setLeads(all);
     }
     setLoading(false);
   }, [user]);

@@ -19,20 +19,36 @@ export const useProspects = () => {
       return;
     }
     setLoading(true);
-    const { data, error } = await supabase
-      .from('prospects')
-      .select('*')
-      .eq('user_id', user.id)
-      .order('created_at', { ascending: false });
 
-    if (error) {
+    // PostgREST caps a single response at its max_rows setting (1000 by
+    // default), so a lone select() silently truncates past that count. Page
+    // through with .range() until a page comes back short.
+    const PAGE_SIZE = 1000;
+    const all: Prospect[] = [];
+    let pageError: string | null = null;
+    for (let from = 0; ; from += PAGE_SIZE) {
+      const { data, error } = await supabase
+        .from('prospects')
+        .select('*')
+        .eq('user_id', user.id)
+        .order('created_at', { ascending: false })
+        .range(from, from + PAGE_SIZE - 1);
+      if (error) {
+        pageError = error.message;
+        break;
+      }
+      all.push(...((data as Prospect[]) ?? []));
+      if (!data || data.length < PAGE_SIZE) break;
+    }
+
+    if (pageError) {
       // A failed read must never render as an empty list: someone who sees no
       // prospects will re-import them, and now there are two of everything.
-      console.error('Error fetching prospects:', error);
-      setLoadError(error.message);
+      console.error('Error fetching prospects:', pageError);
+      setLoadError(pageError);
     } else {
       setLoadError(null);
-      setProspects((data as Prospect[]) ?? []);
+      setProspects(all);
     }
     setLoading(false);
   }, [user]);

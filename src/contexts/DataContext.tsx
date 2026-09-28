@@ -58,21 +58,26 @@ export const DataProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
     setLoading(true);
     try {
-      const { data, error } = await supabase
-        .from('jobs')
-        .select('*')
-        .eq('user_id', user.id)
-        .order('updated_at', { ascending: false });
+      // PostgREST caps a single response at its max_rows setting (1000 by
+      // default), so a lone select() silently truncates past that count. Page
+      // through with .range() until a page comes back short.
+      const PAGE_SIZE = 1000;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const data: any[] = [];
+      for (let from = 0; ; from += PAGE_SIZE) {
+        const { data: page, error } = await supabase
+          .from('jobs')
+          .select('*')
+          .eq('user_id', user.id)
+          .order('updated_at', { ascending: false })
+          .range(from, from + PAGE_SIZE - 1);
 
-      if (error) {
-        console.error('Error fetching materials:', error);
-        return;
-      }
-
-      if (!data) {
-        console.log('No data returned from database');
-        setMaterials([]);
-        return;
+        if (error) {
+          console.error('Error fetching materials:', error);
+          return;
+        }
+        data.push(...(page ?? []));
+        if (!page || page.length < PAGE_SIZE) break;
       }
 
       console.log(`Fetched ${data.length} materials from database`);
