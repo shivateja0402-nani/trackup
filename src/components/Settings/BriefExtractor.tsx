@@ -104,7 +104,7 @@ export const BriefExtractor: React.FC<{
         }
         throw new Error(detail ?? (fnError as Error).message);
       }
-      if (isStaleDeployment(data)) throw new Error(outOfDateMessage(data));
+      if (isStaleDeployment(data, 'extract-brief')) throw new Error(outOfDateMessage(data, 'extract-brief'));
 
       const payload = (data as { brief?: ExtractedBrief; error?: string } | null) ?? null;
       if (payload?.error) throw new Error(payload.error);

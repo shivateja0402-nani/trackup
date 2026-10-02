@@ -9,15 +9,27 @@
 // So every function stamps its contract version and the client checks it.
 
 /*
-  Bumped to 3 when OpenRouter landed.
-
-  This was left at 2 while the functions moved to 3, which is the failure this
-  file exists to prevent, only inverted: the check is `version < EXPECTED`, so
-  someone still running v2 functions was told everything was fine and then hit a
-  confusing provider error the moment they picked OpenRouter. The number here
-  and the CONTRACT in every function have to move together.
+  Each function now carries its own number, because they no longer move
+  together: generate-outreach went to 5 when it grew the n8n `promptOnly` and
+  browser `buildOnly` modes, while the other three had no reason to change and
+  stayed at 3. A single shared EXPECTED_CONTRACT was tried first and was wrong
+  the moment the functions diverged — it told someone whose unrelated
+  functions were genuinely fine that they needed to redeploy all four, which
+  is the exact false alarm this file exists to prevent. Each function's
+  number here and its own CONTRACT constant have to move together instead.
 */
-export const EXPECTED_CONTRACT = 3;
+export const EXPECTED_CONTRACTS: Record<string, number> = {
+  'generate-outreach': 5,
+  'generate-proposal': 3,
+  'extract-brief': 3,
+  'list-models': 3,
+};
+
+const FALLBACK_EXPECTED_CONTRACT = 3;
+
+/** The version this build expects from one named function. */
+export const expectedContractFor = (name: string): number =>
+  EXPECTED_CONTRACTS[name] ?? FALLBACK_EXPECTED_CONTRACT;
 
 /** What version a response claims to be, or null when it carries no marker. */
 export const contractOf = (payload: unknown): number | null => {
@@ -35,27 +47,28 @@ export const contractOf = (payload: unknown): number | null => {
  * take from one that landed on a different project, and the user has no way to
  * tell which without asking.
  */
-export const outOfDateMessage = (payload: unknown): string => {
+export const outOfDateMessage = (payload: unknown, functionName: string): string => {
   const got = contractOf(payload);
+  const expected = expectedContractFor(functionName);
   const seen = got === null
     ? 'The function that answered carries no version at all, so it is running code from before this check existed.'
-    : `The function that answered reports version ${got}; this app needs ${EXPECTED_CONTRACT}.`;
+    : `The function that answered reports version ${got}; this app needs ${expected}.`;
   return (
-    `${seen} Redeploy all four functions from THIS build. ` +
+    `${seen} Redeploy ${functionName} from THIS build. ` +
     'Settings shows the exact source to paste, and Test this key will tell you which version is live once you have. ' +
     'If you copied the source from a deployed site, make sure that site has rebuilt from the latest commit first.'
   );
 };
 
 export const OUT_OF_DATE =
-  'Your Supabase edge functions are an older version than this app expects. Redeploy all four, then try again.';
+  'Your Supabase edge functions are an older version than this app expects. Redeploy them, then try again.';
 
-/** True when the response came from a deployment older than this build. */
-export const isStaleDeployment = (payload: unknown): boolean => {
+/** True when the response came from a deployment older than this build expects for that function. */
+export const isStaleDeployment = (payload: unknown, functionName: string): boolean => {
   if (!payload || typeof payload !== 'object') return false;
   const raw = (payload as Record<string, unknown>).__contract;
   const version = typeof raw === 'string' ? Number(raw) : typeof raw === 'number' ? raw : NaN;
-  return !Number.isFinite(version) || version < EXPECTED_CONTRACT;
+  return !Number.isFinite(version) || version < expectedContractFor(functionName);
 };
 
 /** Strips the marker so it is never stored alongside real content. */

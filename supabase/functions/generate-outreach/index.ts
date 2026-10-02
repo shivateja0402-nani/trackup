@@ -14,6 +14,7 @@
 // derived from the doctrine, is the only way that stays fixed.
 
 import { createClient } from 'npm:@supabase/supabase-js@2';
+import { buildServerLinkedinPrompt, type BuildServerPromptOptions } from '../_shared/buildPrompt.ts';
 
 /**
  * Origins allowed to call this function.
@@ -37,7 +38,8 @@ const corsFor = (req: Request) => {
 };
 
 /**
- * Identify the caller and REQUIRE a real signed-in user.
+ * Identify the caller and REQUIRE either a real signed-in user, OR a trusted
+ * server-to-server caller presenting this project's own service-role key.
  *
  * These functions deploy with verify_jwt off, because the browser calls them
  * with the anon key. The platform therefore performs no auth at all and this is
@@ -46,22 +48,70 @@ const corsFor = (req: Request) => {
  * project make the outbound call, burning their invocation quota and lending
  * their domain to whatever the caller is doing.
  *
- * Deliberately duplicated rather than shared: the setup wizard hands these
- * sources to the user as copy-paste text, so a cross-file import would not
- * survive the install.
+ * Two paths, and the second is additive — it does not weaken the first:
+ *
+ *   1. Browser path (unchanged). The Authorization header carries the
+ *      end-user's own JWT, verified via supabase-js against the project's
+ *      anon key. The acting user is whoever that JWT says it is. `bodyUserId`
+ *      is IGNORED on this path, so a browser caller cannot impersonate anyone
+ *      else by adding a `user_id` to the request body.
+ *   2. Server path (new). The Authorization header carries THIS project's
+ *      service-role key, checked by comparing against `SUPABASE_SERVICE_ROLE_KEY`
+ *      at request time, not a hardcoded string, so this holds in every
+ *      deployment of this function without being re-typed anywhere. That env
+ *      var is injected automatically into every Supabase Edge Function's
+ *      runtime; nothing needs to be configured for this comparison to work.
+ *      Only a caller already holding the single most privileged secret in the
+ *      project can take this path, so it is trusted to say who it is acting
+ *      for, via `bodyUserId`. This is the path n8n's server-to-server calls use.
+ *
+ * Deliberately duplicated rather than shared with the sibling functions: the
+ * setup wizard hands these sources to the user as copy-paste text, so a
+ * cross-file import would not survive the install.
  */
-async function requireUser(req: Request): Promise<string | null> {
+async function requireUser(req: Request, bodyUserId?: string): Promise<string | null> {
+  const authHeader = req.headers.get('Authorization') ?? '';
+  const bearer = authHeader.replace(/^Bearer\s+/i, '').trim();
+
+  const serviceRoleKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY');
+  if (serviceRoleKey && bearer && bearer === serviceRoleKey) {
+    const uid = (bodyUserId ?? '').trim();
+    return uid || null;
+  }
+
   try {
     const client = createClient(
       Deno.env.get('SUPABASE_URL')!,
       Deno.env.get('SUPABASE_ANON_KEY')!,
-      { global: { headers: { Authorization: req.headers.get('Authorization') ?? '' } } },
+      { global: { headers: { Authorization: authHeader } } },
     );
     const { data } = await client.auth.getUser();
     return data?.user?.id ?? null;
   } catch {
     return null;
   }
+}
+
+/**
+ * Whether this request authenticated via the service-role path above, rather
+ * than a real end-user JWT.
+ *
+ * `buildOnly` (below) exists for the browser, which always carries its own
+ * signed-in user's JWT. n8n's server-to-server calls carry the service-role
+ * key instead, and must never be able to request a build "as" an arbitrary
+ * `user_id` through this mode — that would let a holder of the service-role
+ * key read any user's case studies, qualification and vertical brief through
+ * a response intended only for the signed-in owner of that data. `requireUser`
+ * already resolves a `userId` for both paths; this is the one extra bit it
+ * does not expose, kept as its own tiny check rather than changing that
+ * function's return shape and risking the n8n (promptOnly) path it already
+ * serves correctly.
+ */
+function isServiceRoleBearer(req: Request): boolean {
+  const authHeader = req.headers.get('Authorization') ?? '';
+  const bearer = authHeader.replace(/^Bearer\s+/i, '').trim();
+  const serviceRoleKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY');
+  return Boolean(serviceRoleKey && bearer && bearer === serviceRoleKey);
 }
 
 
@@ -75,7 +125,7 @@ async function requireUser(req: Request): Promise<string | null> {
  * marker is an old deployment, and the app now says so instead of leaving the
  * user to interpret a blank result.
  */
-const CONTRACT = 3;
+const CONTRACT = 5;
 
 type Provider = 'gemini' | 'openai' | 'anthropic' | 'openrouter';
 
@@ -167,6 +217,14 @@ async function readProviderError(res: Response): Promise<string> {
 
 
 interface LeadInput {
+  /**
+   * The lead's row id in `leads`. Optional because the browser path (which
+   * already sends a fully-composed systemPrompt + steps) never needed it.
+   * Required for the server-build path below, which uses it to read
+   * `leads.qualification` so the generated prompt carries the same tier
+   * ceiling and buying-ladder instruction the app would show for this lead.
+   */
+  id?: string;
   name?: string;
   job_title?: string;
   company_name?: string;
@@ -194,6 +252,68 @@ interface RequestInput {
   provider?: Provider;
   model?: string;
   apiKey?: string;
+  /**
+   * Which method pack to build server-side when the caller sends neither a
+   * `systemPrompt` nor `steps`. Only `'linkedin'` is wired today (see
+   * ../_shared/buildPrompt.ts). The browser's own LinkedInApp.tsx still
+   * builds and sends its own systemPrompt + steps, so it never needs this
+   * field and this branch never fires for it; it exists for callers with no
+   * method-engine code of their own, i.e. n8n.
+   */
+  channel?: 'linkedin';
+  /**
+   * Whose data to build the prompt from, and whose case studies/qualification/
+   * vertical brief/context to read. Required on the service-role auth path
+   * (see requireUser above), where there is no end-user JWT to derive it from.
+   * Ignored on the browser's own JWT path.
+   */
+  user_id?: string;
+  /**
+   * Build the prompt and stop. No provider, model or apiKey is required or
+   * used, and no outbound LLM call is made or quota spent.
+   *
+   * Exists for n8n's "Generate DM Sequences A/B/C" workflows: each of them
+   * keeps its OWN Gemini HTTP node, credential and key completely untouched
+   * (n8n has no way to move a credential's secret value into a request body,
+   * by design, and this project's n8n license does not have the Variables
+   * feature that the original plan would otherwise have leaned on). So this
+   * function's job for n8n shrinks to exactly the one thing a server caller
+   * cannot do for itself: build the doctrine-correct prompt. n8n's own
+   * Gemini node then sends `systemPrompt` + `prompt` to Gemini exactly as it
+   * already does today, under its own key.
+   */
+  promptOnly?: boolean;
+  /**
+   * Build the LinkedIn prompt and stop, same as `promptOnly`, but for the
+   * browser rather than n8n: returns the FULL build result (chosen case
+   * study and alternatives, the empty/industry-only/unknown-proof banners,
+   * the qualification verdict's `declined`, and which vertical mode was
+   * used) instead of just `{ systemPrompt, prompt }`, and no outbound LLM
+   * call is made here either.
+   *
+   * Requires a real signed-in end-user JWT — see `isServiceRoleBearer`
+   * below. n8n has no use for this mode (it has no UI to show the extra
+   * fields to), and is blocked from it on purpose: a service-role caller
+   * supplying an arbitrary `user_id` must never be able to read that user's
+   * case studies, qualification or vertical brief back out through this
+   * response.
+   */
+  buildOnly?: boolean;
+  /** Force a specific case study, e.g. because the user overrode the pick. Only used with `buildOnly`. */
+  forceCaseId?: string;
+  /** Whether this generation should use the vertical brief. Only used with `buildOnly`. */
+  verticalMode?: 'vertical' | 'generic';
+  /**
+   * The live (possibly unsaved) qualification answers for this lead. Only
+   * used with `buildOnly`. Sending the key at all, including as `null`,
+   * overrides the saved `leads.qualification` row; omitting it falls back
+   * to that row, same as before this field existed.
+   */
+  qualificationInput?: BuildServerPromptOptions['qualificationInput'];
+  /** The sender's own prompt override (src/lib/prompts.ts). Only used with `buildOnly`. */
+  userPrompt?: string;
+  /** Set when the browser's case-study vault could not be read. Only used with `buildOnly`. */
+  vaultUnavailable?: boolean;
 }
 
 const DEFAULT_MODEL: Record<Provider, string> = {
@@ -393,27 +513,127 @@ Deno.serve(async (req: Request) => {
   if (req.method === 'OPTIONS') return new Response('ok', { headers: cors });
   if (req.method !== 'POST') return json({ error: 'Method not allowed' }, 405, cors);
 
-  const userId = await requireUser(req);
+  // Body is parsed before auth now (it used to be parsed inside the try block
+  // below, after auth): the service-role auth path needs `user_id` out of the
+  // body to know who it is acting for, so the body has to exist first.
+  let input: RequestInput;
+  try {
+    input = (await req.json()) as RequestInput;
+  } catch {
+    return json({ error: 'Invalid JSON body.' }, 400, cors);
+  }
+
+  const userId = await requireUser(req, input.user_id);
   if (!userId) return json({ error: 'Sign in before generating outreach.' }, 401, cors);
 
   try {
-    const input = (await req.json()) as RequestInput;
     const lead = input.lead ?? {};
     const provider = input.provider;
     const apiKey = (input.apiKey ?? '').trim();
+    const promptOnly = input.promptOnly === true;
+    const buildOnly = input.buildOnly === true;
 
     if (!lead.name || !lead.linkedin_url) {
       return json({ error: 'Lead name and LinkedIn URL are required.' }, 400, cors);
     }
-    if (provider !== 'gemini' && provider !== 'openai' && provider !== 'anthropic' && provider !== 'openrouter') {
-      return json({ error: 'A valid provider (gemini, openai, anthropic) is required.' }, 400, cors);
+
+    // buildOnly: the browser's own build, standing in for the local
+    // buildChannelPrompt() call LinkedInApp.tsx used to make. Resolved and
+    // returned before any of the promptOnly/provider logic below, because it
+    // shares none of it: no provider/apiKey, no `steps`/`systemPrompt`
+    // override from the caller, and a response shape promptOnly callers
+    // (n8n) have no use for.
+    if (buildOnly) {
+      // The one check promptOnly does not need: buildOnly hands back
+      // user-owned data (case studies, qualification, vertical brief), so it
+      // must only run for the user who actually owns that data, never for a
+      // service-role caller asserting an arbitrary `user_id`.
+      if (isServiceRoleBearer(req)) {
+        return json({ error: 'buildOnly is for a signed-in browser session, not a server-to-server call.' }, 403, cors);
+      }
+      const serviceClient = createClient(
+        Deno.env.get('SUPABASE_URL')!,
+        Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!,
+      );
+      const buildOptions: BuildServerPromptOptions = {};
+      if (input.forceCaseId) buildOptions.forceCaseId = input.forceCaseId;
+      if (input.verticalMode) buildOptions.verticalMode = input.verticalMode;
+      // Presence, not truthiness: sending `qualificationInput: null` means
+      // "the screen was cleared", which must override the saved row the same
+      // way a real answer would, not be treated as "field not sent".
+      if ('qualificationInput' in input) buildOptions.qualificationInput = input.qualificationInput ?? null;
+      if (input.userPrompt) buildOptions.userPrompt = input.userPrompt;
+      if (input.vaultUnavailable) buildOptions.vaultUnavailable = true;
+
+      const built = await buildServerLinkedinPrompt(serviceClient, userId, lead, buildOptions);
+      // Shaped explicitly rather than `json(built, ...)`: `built.pack` carries
+      // live RegExp values in `banned[].pattern`, which JSON.stringify turns
+      // into `{}`. The browser already has the real pack locally (it calls
+      // `getPack('linkedin')` itself for the same reasons it always has), so
+      // sending the id and version — the two pack facts that are not already
+      // on screen — is both what the caller needs and honest about what
+      // crossed the wire.
+      return json(
+        {
+          systemPrompt: built.systemPrompt,
+          steps: built.steps,
+          chosen: built.chosen,
+          alternatives: built.alternatives,
+          nothingToWriteFrom: built.nothingToWriteFrom,
+          industryOnly: built.industryOnly,
+          proofUnknown: built.proofUnknown,
+          proofEmpty: built.proofEmpty,
+          declined: built.declined,
+          usingBrief: built.usingBrief,
+          verticalMode: built.verticalMode,
+          evidence: built.evidence,
+          packId: built.pack.id,
+          packVersion: built.pack.version,
+        },
+        200,
+        cors,
+      );
     }
-    if (!apiKey) return json({ error: 'An API key is required. Add one in Settings.' }, 400, cors);
+
+    // promptOnly makes no outbound LLM call, so none of provider/model/apiKey
+    // is needed and n8n's request never sends them. Every other check below
+    // (steps resolved, server build succeeds) still applies unchanged.
+    if (!promptOnly) {
+      if (provider !== 'gemini' && provider !== 'openai' && provider !== 'anthropic' && provider !== 'openrouter') {
+        return json({ error: 'A valid provider (gemini, openai, anthropic) is required.' }, 400, cors);
+      }
+      if (!apiKey) return json({ error: 'An API key is required. Add one in Settings.' }, 400, cors);
+    }
 
     // The contract comes from the caller's method pack. Without it there is no
     // honest shape to ask for, and guessing one is what produced the drift this
     // parameter exists to end.
-    const steps = (input.steps ?? []).filter((s) => s && typeof s.key === 'string' && s.key);
+    let steps = (input.steps ?? []).filter((s) => s && typeof s.key === 'string' && s.key);
+    let systemPromptOverride = (input.systemPrompt ?? '').trim();
+
+    // Server-side prompt build: the caller named a channel and sent neither a
+    // systemPrompt nor a step contract of its own, which is exactly the shape
+    // of a caller with no method-engine code — n8n's "Generate DM Sequences
+    // A/B/C" workflows. The browser's own LinkedInApp.tsx always sends both
+    // today, so this branch never fires for it and that path is unchanged.
+    if (input.channel === 'linkedin' && !systemPromptOverride && !steps.length) {
+      // Service-role client, NOT the per-request auth client used above: this
+      // reads case_studies / users / leads / vertical_briefs / industry_evidence
+      // for `userId` regardless of which auth path produced it, including the
+      // browser-JWT path (unused today, since the browser never hits this
+      // branch, but kept correct rather than assuming). Row Level Security
+      // would otherwise block every one of these reads for a caller with no
+      // JWT at all, which is exactly the n8n case. `SUPABASE_SERVICE_ROLE_KEY`
+      // is injected automatically into every Edge Function; nothing to configure.
+      const serviceClient = createClient(
+        Deno.env.get('SUPABASE_URL')!,
+        Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!,
+      );
+      const built = await buildServerLinkedinPrompt(serviceClient, userId, lead);
+      systemPromptOverride = built.systemPrompt;
+      steps = built.steps;
+    }
+
     if (!steps.length) {
       return json(
         { error: 'No output steps were supplied. Update the app so it sends the method pack structure.' },
@@ -422,11 +642,23 @@ Deno.serve(async (req: Request) => {
       );
     }
 
-    const model = (input.model ?? '').trim() || DEFAULT_MODEL[provider];
     const system =
-      ((input.systemPrompt ?? '').trim() || SYSTEM_PROMPT) +
+      (systemPromptOverride || SYSTEM_PROMPT) +
       ' Always reply with a single valid JSON object and nothing else.';
     const prompt = buildPrompt(lead, (input.context ?? '').trim(), steps);
+
+    // promptOnly stops here: the two strings an LLM call would otherwise have
+    // received, and nothing else. No provider/model/apiKey was required above,
+    // and no outbound call happens below this point for this request.
+    if (promptOnly) {
+      return json({ systemPrompt: system, prompt }, 200, cors);
+    }
+
+    // provider is guaranteed valid at this point: the promptOnly branch above
+    // already returned for every request that skipped the provider/apiKey
+    // checks, so every request reaching here took the `!promptOnly` branch
+    // where that validation ran.
+    const model = (input.model ?? '').trim() || DEFAULT_MODEL[provider as Provider];
 
     let raw: string;
     if (provider === 'anthropic') {

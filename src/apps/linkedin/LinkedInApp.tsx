@@ -11,10 +11,12 @@ import { funnelFor, closedCount, revenueFrom, MIN_SAMPLE } from '../../lib/funne
 import { supabase } from '../../lib/supabase';
 import { loadAIConfig } from '../../lib/aiConfig';
 import { loadUserContext, senderAbout } from '../../lib/userContext';
-import { buildChannelPrompt, checkAgainstMethod } from '../../lib/method/forChannel';
+import { checkAgainstMethod } from '../../lib/method/forChannel';
+import { loadPrompts } from '../../lib/prompts';
 import { useVerticalBrief } from '../../lib/vertical/useVerticalBrief';
 import { useVerticalMode } from '../../lib/vertical/useVerticalMode';
-import type { IndustryEvidence } from '../../lib/vertical/types';
+import type { IndustryEvidence, VerticalMode } from '../../lib/vertical/types';
+import type { ScoredCase } from '../../lib/proof/types';
 import { VerticalToggle } from '../../components/UI/VerticalToggle';
 import { useCaseStudies } from '../../lib/proof';
 import { QualifyPanel } from '../../components/Qualify/QualifyPanel';
@@ -282,6 +284,29 @@ export const LinkedInApp: React.FC<{
 
 // --- Lead detail + flow ------------------------------------------------------
 
+/**
+ * Mirrors the `buildOnly` response shape from
+ * supabase/functions/generate-outreach/index.ts, which in turn mirrors
+ * src/lib/method/forChannel.ts's `ChannelPrompt` (minus the full `pack`,
+ * which does not survive JSON — its `banned` patterns are live RegExps).
+ */
+interface BuildOnlyResult {
+  systemPrompt: string;
+  steps: { key: string; label: string; purpose: string; maxChars?: number; constraints: string[] }[];
+  chosen: ScoredCase | null;
+  alternatives: ScoredCase[];
+  nothingToWriteFrom: boolean;
+  industryOnly: boolean;
+  proofUnknown: boolean;
+  proofEmpty: boolean;
+  declined: boolean;
+  usingBrief: boolean;
+  verticalMode: VerticalMode;
+  evidence: IndustryEvidence[];
+  packId: string;
+  packVersion: string;
+}
+
 const LeadDetail: React.FC<{
   lead: Lead;
   /** The sequence position to open on, when arriving from a due list. */
@@ -291,7 +316,14 @@ const LeadDetail: React.FC<{
   onUpdate: (id: string, updates: Partial<Lead>) => Promise<MutationResult>;
   onDelete: (id: string) => void;
 }> = ({ lead, focusStep, onUpdate, onDelete }) => {
-  const { cases, loadError: vaultError } = useCaseStudies();
+  // `cases` itself is no longer read here: the server build
+  // (buildServerLinkedinPrompt, called via the `buildOnly` request below)
+  // reads case_studies straight from the database for this user, the same
+  // table this hook queries. `loadError` still matters locally — it is the
+  // one thing the server has no way to know, and generating anyway would
+  // spend the user's money writing copy as if the vault were empty rather
+  // than unreadable.
+  const { loadError: vaultError } = useCaseStudies();
   const [generating, setGenerating] = useState(false);
   const [error, setError] = useState('');
   const [copied, setCopied] = useState<string | null>(null);
@@ -485,42 +517,65 @@ const LeadDetail: React.FC<{
     setNoProof(false);
     setIndustryOnly(false);
     setGenerating(true);
-    // Match a case study to THIS lead's world rather than sending the whole
-    // vault. "One proof, matched to the reader" is a law in every pack.
-    const method = buildChannelPrompt('linkedin', {
-      cases,
-      vaultUnavailable: Boolean(vaultError),
-      target: {
-        industry: lead.industry,
-        buyer_role: lead.job_title,
-        notes: [lead.company_name, lead.industry, lead.potential_services].filter(Boolean).join(' · '),
-      },
-      // The screen's verdict travels into the prompt: it decides what job the
-      // message has to do, and caps what the copy may claim to know about them.
-      qualification: verdict,
-      brief,
-      verticalMode: mode,
-    });
-    setSentEvidence(method.evidence);
-    setProofUsed(method.chosen ? method.chosen.caseStudy.title : null);
-    setNoProof(method.nothingToWriteFrom);
-    setIndustryOnly(method.industryOnly);
     try {
+      const leadForFn = {
+        id: lead.id, name: lead.name, job_title: lead.job_title, company_name: lead.company_name,
+        industry: lead.industry, linkedin_url: lead.linkedin_url,
+        company_website: lead.company_website, potential_services: lead.potential_services,
+      };
+
+      // The server now builds the full doctrine prompt — case study pick
+      // (matched to THIS lead's world; "one proof, matched to the reader" is
+      // a law in every pack), the qualification brief, the vertical mode and
+      // the sender's own prompt override — the same composition
+      // buildChannelPrompt used to run locally. See
+      // supabase/functions/_shared/buildPrompt.ts's buildServerLinkedinPrompt,
+      // which this mirrors exactly. No LLM call happens on this request.
+      const { data: built, error: buildError } = await supabase.functions.invoke<BuildOnlyResult>('generate-outreach', {
+        body: {
+          buildOnly: true,
+          lead: leadForFn,
+          vaultUnavailable: Boolean(vaultError),
+          // The screen's live (possibly unsaved) answers travel with the
+          // request, exactly as they travelled straight into buildChannelPrompt
+          // before: the server has no draft state of its own to fall back to.
+          // `qual ?? {}`, not `qual`: buildChannelPrompt always ran
+          // `qualify(qual ?? {})` and always rendered the result, even an
+          // untouched screen's "notYet" verdict, so an empty object has to
+          // make the same trip rather than being read as "nothing sent".
+          qualificationInput: qual ?? {},
+          verticalMode: mode,
+          // The user's own editable "outreach" prompt slot lives only in this
+          // browser's localStorage, so it has to be sent rather than read
+          // server-side.
+          userPrompt: loadPrompts().outreach,
+        },
+      });
+      if (buildError) {
+        let message = buildError.message;
+        const ctx = (buildError as { context?: Response }).context;
+        if (ctx?.json) { const b = await ctx.json().catch(() => null); if (b?.error) message = b.error; }
+        throw new Error(message);
+      }
+      if (!built) throw new Error('No response from the prompt builder.');
+      if (isStaleDeployment(built, 'generate-outreach')) throw new Error(outOfDateMessage(built, 'generate-outreach'));
+
+      setSentEvidence(built.evidence);
+      setProofUsed(built.chosen ? built.chosen.caseStudy.title : null);
+      setNoProof(built.nothingToWriteFrom);
+      setIndustryOnly(built.industryOnly);
+
       const { data, error: fnError } = await supabase.functions.invoke<OutreachFlow>('generate-outreach', {
         body: {
-          lead: {
-            name: lead.name, job_title: lead.job_title, company_name: lead.company_name,
-            industry: lead.industry, linkedin_url: lead.linkedin_url,
-            company_website: lead.company_website, potential_services: lead.potential_services,
-          },
+          lead: leadForFn,
           // Only who they are. Proof comes from the vault, through the system
           // prompt, where the naming rule and the do-not-round framing apply.
           context: senderAbout(loadUserContext()),
-          systemPrompt: method.systemPrompt,
+          systemPrompt: built.systemPrompt,
           // The output contract, straight from the pack. Without this the
           // generator invents its own shape and the validator grades keys
           // nobody asked for.
-          steps: method.steps,
+          steps: built.steps,
           provider: cfg.provider, model: cfg.model, apiKey: cfg.apiKey,
         },
       });
@@ -533,7 +588,7 @@ const LeadDetail: React.FC<{
       if (!data) throw new Error('No response from the generator.');
       // An old deployment answers with content this build cannot use. Say that,
       // rather than letting it land as an empty flow the user has to interpret.
-      if (isStaleDeployment(data)) throw new Error(outOfDateMessage(data));
+      if (isStaleDeployment(data, 'generate-outreach')) throw new Error(outOfDateMessage(data, 'generate-outreach'));
       const flowData = stripContract(data as unknown as Record<string, string>) as unknown as OutreachFlow;
 
       // The function marks a partial response rather than letting the missing
@@ -552,11 +607,11 @@ const LeadDetail: React.FC<{
       // state, and the qualification verdict is re-derived at read time.
       const meta: GenerationMeta = {
         at: new Date().toISOString(),
-        pack_id: method.pack.id,
-        pack_version: method.pack.version,
-        case_study_id: method.chosen?.caseStudy.id ?? null,
-        case_study_title: method.chosen?.caseStudy.title ?? null,
-        case_study_score: method.chosen?.score ?? null,
+        pack_id: built.packId,
+        pack_version: built.packVersion,
+        case_study_id: built.chosen?.caseStudy.id ?? null,
+        case_study_title: built.chosen?.caseStudy.title ?? null,
+        case_study_score: built.chosen?.score ?? null,
         tier: verdict.tier,
         rung: verdict.rung,
         verdict: verdict.verdict,
@@ -565,8 +620,8 @@ const LeadDetail: React.FC<{
         violation_ids: checkAgainstMethod(
           'linkedin',
           flowData as Record<string, string>,
-          method.evidence,
-          !method.nothingToWriteFrom,
+          built.evidence,
+          !built.nothingToWriteFrom,
         ).violations.map((v) => v.patternId ?? v.lawId ?? 'empty-step'),
       };
 

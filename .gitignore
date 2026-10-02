@@ -31,3 +31,4 @@ supabase/.temp
 *.tsbuildinfo
 node_modules/.cache
 .smoke.mjs
+graphify-out/

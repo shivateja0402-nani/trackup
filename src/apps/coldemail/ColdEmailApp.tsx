@@ -394,7 +394,7 @@ const ProspectDetail: React.FC<{
         throw new Error(message);
       }
       if (!data) throw new Error('No response from the generator.');
-      if (isStaleDeployment(data)) throw new Error(outOfDateMessage(data));
+      if (isStaleDeployment(data, 'generate-outreach')) throw new Error(outOfDateMessage(data, 'generate-outreach'));
       const seqData = stripContract(data as unknown as Record<string, string>) as unknown as EmailSequence;
 
       const partial = (seqData as Record<string, string>).__partial;

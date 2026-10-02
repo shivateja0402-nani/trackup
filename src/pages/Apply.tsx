@@ -184,8 +184,8 @@ export const Apply: React.FC = () => {
       // Old deployment. Without this the letter arrives assembled from steps
       // that were never returned, which renders as an empty textarea and looks
       // like the app simply did nothing.
-      if (isStaleDeployment(data)) {
-        throw new Error(outOfDateMessage(data));
+      if (isStaleDeployment(data, 'generate-proposal')) {
+        throw new Error(outOfDateMessage(data, 'generate-proposal'));
       }
       if (!data.cover_letter?.trim()) {
         throw new Error(

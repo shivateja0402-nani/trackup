@@ -13,7 +13,7 @@ import { getPack } from '../lib/method/packs';
 import { composeSystemPrompt } from '../lib/method/compose';
 import type { ChannelId } from '../lib/method/types';
 import { supabase } from '../lib/supabase';
-import { contractOf, EXPECTED_CONTRACT, probeFunctionVersions, type FunctionVersion } from '../lib/deployment';
+import { contractOf, expectedContractFor, probeFunctionVersions, type FunctionVersion } from '../lib/deployment';
 import { ModelSelect } from '../components/UI/ModelSelect';
 import { CaseStudyVault } from '../components/Settings/CaseStudyVault';
 import { VerticalBriefPanel } from '../components/Settings/VerticalBriefPanel';
@@ -180,14 +180,15 @@ export const Settings: React.FC = () => {
       // "undefined answered ok" while doing it.
       const ranTest = typeof data?.reply === 'string' && data.reply.length > 0;
       const live = contractOf(data);
+      const expected = expectedContractFor('list-models');
       const backend =
         live === null
-          ? ' Your edge functions are running code older than this app expects, so generation will fail until you redeploy all four from this build.'
-          : live < EXPECTED_CONTRACT
-            ? ` Your edge functions report version ${live}; this app needs ${EXPECTED_CONTRACT}. Redeploy all four.`
+          ? ' Your list-models function is running code older than this app expects, so generation will fail until you redeploy it from this build.'
+          : live < expected
+            ? ` Your list-models function reports version ${live}; this app needs ${expected}. Redeploy it.`
             : ` Backend version ${live}, up to date.`;
       setTestResult({
-        ok: ranTest && live !== null && live >= EXPECTED_CONTRACT,
+        ok: ranTest && live !== null && live >= expected,
         message: ranTest
           ? `${data?.model ?? 'The model'} answered "${data.reply}". Your key works and this model can generate.${backend}`
           : `Your key reached Supabase, but this function is too old to run a generation test, so nothing about the model was proved.${backend}`,
@@ -318,7 +319,7 @@ export const Settings: React.FC = () => {
           {versions && (
             <div className="text-sm p-4 rounded-xl border border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-800/60 space-y-1">
               <p className="font-semibold text-gray-800 dark:text-gray-200 mb-1">
-                Deployed function versions (this app needs {EXPECTED_CONTRACT})
+                Deployed function versions
               </p>
               {/* The project being read, spelled out. When all four functions
                   report stale after a redeploy that definitely happened, the
@@ -329,29 +330,32 @@ export const Settings: React.FC = () => {
                 Reading from <span className="font-mono">{supabaseConfig?.url ?? 'no project configured'}</span>. Deploy
                 your functions to <span className="font-semibold">this</span> project.
               </p>
-              {versions.map((v) => (
-                <p
-                  key={v.name}
-                  className={
-                    v.version !== null && v.version >= EXPECTED_CONTRACT
-                      ? 'text-green-700 dark:text-green-400'
-                      : 'text-amber-700 dark:text-amber-400'
-                  }
-                >
-                  <span className="font-mono">{v.name}</span>{' '}
-                  {v.isTemplate
-                    ? 'still contains Supabase’s default hello-world template. Ember’s code was never saved into it: pasting is not enough, you have to press Deploy.'
-                    : v.gatewayRejected
-                    ? 'was blocked before it ran. Turn OFF "Verify JWT" in that function’s settings.'
-                    : !v.reachable
-                      ? 'did not respond. It may not be deployed.'
-                      : v.version === null
-                        ? 'is running code older than this check. Redeploy it.'
-                        : v.version >= EXPECTED_CONTRACT
-                          ? `is version ${v.version}, up to date.`
-                          : `is version ${v.version}. Redeploy it.`}
-                </p>
-              ))}
+              {versions.map((v) => {
+                const expected = expectedContractFor(v.name);
+                return (
+                  <p
+                    key={v.name}
+                    className={
+                      v.version !== null && v.version >= expected
+                        ? 'text-green-700 dark:text-green-400'
+                        : 'text-amber-700 dark:text-amber-400'
+                    }
+                  >
+                    <span className="font-mono">{v.name}</span>{' '}
+                    {v.isTemplate
+                      ? 'still contains Supabase’s default hello-world template. Ember’s code was never saved into it: pasting is not enough, you have to press Deploy.'
+                      : v.gatewayRejected
+                      ? 'was blocked before it ran. Turn OFF "Verify JWT" in that function’s settings.'
+                      : !v.reachable
+                        ? 'did not respond. It may not be deployed.'
+                        : v.version === null
+                          ? `is running code older than this check. This app needs version ${expected}. Redeploy it.`
+                          : v.version >= expected
+                            ? `is version ${v.version}, up to date.`
+                            : `is version ${v.version}; this app needs ${expected}. Redeploy it.`}
+                  </p>
+                );
+              })}
             </div>
           )}
 

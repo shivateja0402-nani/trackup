@@ -6,11 +6,13 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "prebuild": "node scripts/syncShared.mjs --check",
     "build": "vite build",
     "lint": "eslint .",
     "preview": "vite preview",
     "setup": "node scripts/setup.mjs",
     "method:gen": "node scripts/genPacks.mjs",
+    "method:sync": "node scripts/syncShared.mjs",
     "method:check": "node scripts/checkPatterns.mjs",
     "method:test": "esbuild scripts/smokeMethod.ts --bundle --platform=node --format=esm --outfile=node_modules/.cache/smoke.mjs --log-level=error && node node_modules/.cache/smoke.mjs",
     "proof:test": "esbuild scripts/smokeProof.ts --bundle --platform=node --format=esm --outfile=node_modules/.cache/proof.mjs --log-level=error && node node_modules/.cache/proof.mjs",
